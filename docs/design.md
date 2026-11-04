@@ -1413,3 +1413,41 @@ Esto permitirá que cada nodo utilice una dirección virtual diferente para repr
 El protocolo MSI garantizará coherencia de páginas, pero no implica por sí mismo que varias operaciones de escritura concurrentes sobre diferentes posiciones de una misma página puedan ejecutarse sin coordinación.
 
 Las aplicaciones deberán utilizar los mecanismos de sincronización disponibles para evitar condiciones de carrera entre sus hilos.
+
+# 16. Plan de implementación
+
+El desarrollo se realizará progresivamente mediante los prototipos establecidos para el proyecto.
+
+## 16.1 Prototipo 1
+
+Se espera desarrollar:
+
+- Inicialización de nodos.
+- Lectura del archivo de configuración.
+- Comunicación TCP entre dos o más nodos.
+- Incorporación dinámica de participantes.
+- Envío y recepción de mensajes.
+- Reserva de memoria mediante `mmap`.
+
+## 16.2 Prototipo 2
+
+Se espera incorporar:
+
+- Manejo de fallos `SIGSEGV`.
+- Resolución de fallos de página.
+- Transferencia de páginas.
+- Transiciones MSI.
+- Invalidación de copias.
+- Sincronización entre hilos.
+
+## 16.3 Entrega final
+
+Se espera contar con:
+
+- API funcional.
+- Integración de todos los módulos.
+- Consultas de información local y global.
+- Estadísticas.
+- Aplicaciones de validación.
+- Pruebas con múltiples computadoras físicas.
+- Documentación técnica completa.
