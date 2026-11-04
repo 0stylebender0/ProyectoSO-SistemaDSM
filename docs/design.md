@@ -1120,10 +1120,6 @@ max_connections=64
 [paging]
 max_pending_faults=1024
 request_timeout_ms=5000
-
-[logging]
-log_level=INFO
-log_file=dsm.log
 ```
 
 ## 10.3 Descripción de parámetros
@@ -1144,8 +1140,6 @@ log_file=dsm.log
 | max_connections | uint32_t | 64 | Máximo de conexiones TCP concurrentes. |
 | max_pending_faults | uint32_t | 1024 | Capacidad de eventos pendientes de resolución. |
 | request_timeout_ms | uint32_t | 5000 | Tiempo máximo de espera de solicitudes. |
-| log_level | string | INFO | Nivel de registro. |
-| log_file | string | dsm.log | Archivo de registro. |
 
 Los valores presentados son iniciales y podrán ajustarse según los resultados de las pruebas.
 
