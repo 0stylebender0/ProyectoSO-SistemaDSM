@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(dsm_node
     src/main.cpp
     src/config.cpp
+    src/memory_manager.cpp
 )
 
 target_include_directories(dsm_node PRIVATE include)

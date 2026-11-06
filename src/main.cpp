@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "memory_manager.hpp"
 
 #include <iostream>
 #include <string>
@@ -97,15 +98,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    MemoryManager memory(cfg.memory_size, cfg.page_size);
+    if (!memory.reserve(error)) {
+        std::cerr << "Error reservando memoria: " << error << "\n";
+        return 1;
+    }
+
     std::cout << "[" << cfg.node_name << "] config=" << opt.config_path << "\n";
     std::cout << "[" << cfg.node_name << "] bind=" << cfg.bind_address << "\n";
     std::cout << "[" << cfg.node_name << "] tcp=" << cfg.tcp_port
               << " heartbeat=" << cfg.heartbeat_port
               << " control=" << cfg.control_port << "\n";
-    std::cout << "[" << cfg.node_name << "] memoria=" << cfg.memory_size
-              << " bytes, page_size=" << cfg.page_size << "\n";
-    std::cout << "[" << cfg.node_name << "] workers=" << cfg.worker_count
-              << " max_connections=" << cfg.max_connections << "\n";
+    std::cout << "[" << cfg.node_name << "] memoria configurada="
+              << cfg.memory_size << " bytes\n";
+    std::cout << "[" << cfg.node_name << "] memoria reservada="
+              << memory.size() << " bytes\n";
+    std::cout << "[" << cfg.node_name << "] paginas=" << memory.page_count()
+              << " de " << cfg.page_size << " bytes\n";
+    std::cout << "[" << cfg.node_name << "] mmap base=" << memory.base()
+              << " (PROT_NONE)\n";
     std::cout << "[" << cfg.node_name << "] bootstrap="
               << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
               << "\n";

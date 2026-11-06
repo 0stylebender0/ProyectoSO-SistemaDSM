@@ -9,63 +9,61 @@
 #include <string>
 
 namespace {
-
-std::string trim(const std::string& text) {
-    const char* whitespace = " \t\r\n";
-    const std::size_t begin = text.find_first_not_of(whitespace);
-    if (begin == std::string::npos) {
-        return "";
+    std::string trim(const std::string& text) {
+        const char* whitespace = " \t\r\n";
+        const std::size_t begin = text.find_first_not_of(whitespace);
+        if (begin == std::string::npos) {
+            return "";
+        }
+        const std::size_t end = text.find_last_not_of(whitespace);
+        return text.substr(begin, end - begin + 1);
     }
-    const std::size_t end = text.find_last_not_of(whitespace);
-    return text.substr(begin, end - begin + 1);
-}
 
-bool parse_u64(const std::string& text, uint64_t& out) {
-    if (text.empty()) {
-        return false;
-    }
-    for (char c : text) {
-        if (c < '0' || c > '9') {
+    bool parse_u64(const std::string& text, uint64_t& out) {
+        if (text.empty()) {
+            return false;
+        }
+        for (char c : text) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        try {
+            std::size_t consumed = 0;
+            const unsigned long long value = std::stoull(text, &consumed, 10);
+            if (consumed != text.size()) {
+                return false;
+            }
+            out = static_cast<uint64_t>(value);
+            return true;
+        } catch (...) {
             return false;
         }
     }
-    try {
-        std::size_t consumed = 0;
-        const unsigned long long value = std::stoull(text, &consumed, 10);
-        if (consumed != text.size()) {
+
+    bool parse_u32(const std::string& text, uint32_t& out) {
+        uint64_t value = 0;
+        if (!parse_u64(text, value)) {
             return false;
         }
-        out = static_cast<uint64_t>(value);
+        if (value > std::numeric_limits<uint32_t>::max()) {
+            return false;
+        }
+        out = static_cast<uint32_t>(value);
         return true;
-    } catch (...) {
-        return false;
     }
-}
 
-bool parse_u32(const std::string& text, uint32_t& out) {
-    uint64_t value = 0;
-    if (!parse_u64(text, value)) {
-        return false;
+    bool parse_u16(const std::string& text, uint16_t& out) {
+        uint64_t value = 0;
+        if (!parse_u64(text, value)) {
+            return false;
+        }
+        if (value > std::numeric_limits<uint16_t>::max()) {
+            return false;
+        }
+        out = static_cast<uint16_t>(value);
+        return true;
     }
-    if (value > std::numeric_limits<uint32_t>::max()) {
-        return false;
-    }
-    out = static_cast<uint32_t>(value);
-    return true;
-}
-
-bool parse_u16(const std::string& text, uint16_t& out) {
-    uint64_t value = 0;
-    if (!parse_u64(text, value)) {
-        return false;
-    }
-    if (value > std::numeric_limits<uint16_t>::max()) {
-        return false;
-    }
-    out = static_cast<uint16_t>(value);
-    return true;
-}
-
 }  // namespace
 
 bool validate_config(const Config& cfg, std::string& error) {
@@ -181,6 +179,7 @@ bool load_config(const std::string& path, Config& out, std::string& error) {
         } else {
             // Claves desconocidas (incluidas [logging] -> log_level, log_file)
             // se ignoran en silencio.
+            std::cout << "Clave desconocida '" << key << "' " << std::endl;
         }
     }
 
