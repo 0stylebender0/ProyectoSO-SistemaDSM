@@ -1,3 +1,5 @@
+#include "config.hpp"
+
 #include <iostream>
 #include <string>
 
@@ -66,10 +68,47 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::cout << "config=" << opt.config_path << "\n";
-    std::cout << "bootstrap=" << (opt.bootstrap.empty() ? "(ninguno)" : opt.bootstrap) << "\n";
-    std::cout << "name=" << (opt.node_name.empty() ? "(sin override)" : opt.node_name) << "\n";
-    std::cout << "tcp_port=" << (opt.tcp_port < 0 ? "(sin override)" : std::to_string(opt.tcp_port)) << "\n";
+    Config cfg;
+    std::string error;
+
+    if (!load_config(opt.config_path, cfg, error)) {
+        std::cerr << "Error de configuracion: " << error << "\n";
+        return 1;
+    }
+
+    if (!opt.node_name.empty()) {
+        cfg.node_name = opt.node_name;
+    }
+
+    if (opt.tcp_port >= 0) {
+        if (opt.tcp_port < 1 || opt.tcp_port > 65535) {
+            std::cerr << "Puerto TCP fuera de rango: " << opt.tcp_port << "\n";
+            return 1;
+        }
+        cfg.tcp_port = static_cast<uint16_t>(opt.tcp_port);
+    }
+
+    if (!opt.bootstrap.empty()) {
+        cfg.bootstrap_nodes = opt.bootstrap;
+    }
+
+    if (!validate_config(cfg, error)) {
+        std::cerr << "Configuracion invalida: " << error << "\n";
+        return 1;
+    }
+
+    std::cout << "[" << cfg.node_name << "] config=" << opt.config_path << "\n";
+    std::cout << "[" << cfg.node_name << "] bind=" << cfg.bind_address << "\n";
+    std::cout << "[" << cfg.node_name << "] tcp=" << cfg.tcp_port
+              << " heartbeat=" << cfg.heartbeat_port
+              << " control=" << cfg.control_port << "\n";
+    std::cout << "[" << cfg.node_name << "] memoria=" << cfg.memory_size
+              << " bytes, page_size=" << cfg.page_size << "\n";
+    std::cout << "[" << cfg.node_name << "] workers=" << cfg.worker_count
+              << " max_connections=" << cfg.max_connections << "\n";
+    std::cout << "[" << cfg.node_name << "] bootstrap="
+              << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
+              << "\n";
 
     return 0;
 }
