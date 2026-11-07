@@ -16,3 +16,15 @@ target_compile_options(dsm_node PRIVATE -Wall -Wextra -Wpedantic)
 
 find_package(Threads REQUIRED)
 target_link_libraries(dsm_node PRIVATE Threads::Threads)
+
+enable_testing()
+
+add_executable(test_protocol
+    tests/test_protocol.cpp
+    src/protocol.cpp
+)
+
+target_include_directories(test_protocol PRIVATE include)
+target_compile_options(test_protocol PRIVATE -Wall -Wextra -Wpedantic)
+
+add_test(NAME protocol COMMAND test_protocol)
