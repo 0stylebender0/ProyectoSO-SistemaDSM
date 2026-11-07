@@ -104,20 +104,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "[" << cfg.node_name << "] config=" << opt.config_path << "\n";
-    std::cout << "[" << cfg.node_name << "] bind=" << cfg.bind_address << "\n";
-    std::cout << "[" << cfg.node_name << "] tcp=" << cfg.tcp_port
-              << " heartbeat=" << cfg.heartbeat_port
-              << " control=" << cfg.control_port << "\n";
-    std::cout << "[" << cfg.node_name << "] memoria configurada="
-              << cfg.memory_size << " bytes\n";
-    std::cout << "[" << cfg.node_name << "] memoria reservada="
-              << memory.size() << " bytes\n";
-    std::cout << "[" << cfg.node_name << "] paginas=" << memory.page_count()
-              << " de " << cfg.page_size << " bytes\n";
-    std::cout << "[" << cfg.node_name << "] mmap base=" << memory.base()
+    std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
+    std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
+    std::cout << "[" << cfg.node_name << "] tcp\t\t\t" << cfg.tcp_port << "\n";
+    std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << cfg.heartbeat_port << "\n";
+    std::cout << "[" << cfg.node_name << "] control\t\t\t" << cfg.control_port << "\n";
+
+    std::cout << "[" << cfg.node_name << "] memoria configurada\t"
+              << cfg.memory_size << " bytes / "
+              << (cfg.memory_size) / (1024.0 * 1024.0) << " MB\n";
+
+    std::cout << "[" << cfg.node_name << "] memoria reservada\t"
+              << memory.size() << " bytes / "
+              << (memory.size()) / (1024.0 * 1024.0) << " MB\n";
+
+    std::cout << "[" << cfg.node_name << "] paginas\t\t\t" << memory.page_count()
+              << " de " << cfg.page_size << " bytes / "
+              << (cfg.page_size) / (1024.0) << " KB\n";
+
+    std::cout << "[" << cfg.node_name << "] mmap base\t\t" << memory.base()
               << " (PROT_NONE)\n";
-    std::cout << "[" << cfg.node_name << "] bootstrap="
+
+    std::cout << "[" << cfg.node_name << "] bootstrap\t\t"
               << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
               << "\n";
 
