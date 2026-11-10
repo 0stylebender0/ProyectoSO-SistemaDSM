@@ -1,6 +1,11 @@
 #include "config.hpp"
 #include "memory_manager.hpp"
+#include "network.hpp"
 
+#include <pthread.h>
+#include <signal.h>
+
+#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -104,6 +109,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGTERM);
+    // Los hilos heredan el bloqueo; main recibe las senales con sigwait.
+    const int mask_result = pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+    if (mask_result != 0) {
+        std::cerr << "Error configurando senales: " << std::strerror(mask_result) << "\n";
+        return 1;
+    }
+
+    NetworkManager network(cfg);
+    if (!network.start(error)) {
+        std::cerr << "Error iniciando red: " << error << "\n";
+        return 1;
+    }
+
     std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
     std::cout << "[" << cfg.node_name << "] tcp\t\t\t" << cfg.tcp_port << "\n";
@@ -129,5 +151,18 @@ int main(int argc, char** argv) {
               << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
               << "\n";
 
+    std::cout << "[" << cfg.node_name << "] escuchando TCP en "
+              << cfg.bind_address << ":" << network.port()
+              << " con " << cfg.worker_count << " workers (Ctrl+C para salir)\n"
+              << std::flush;
+
+    int signal = 0;
+    const int wait_result = sigwait(&signals, &signal);
+    if (wait_result != 0) {
+        std::cerr << "Error esperando senal: " << std::strerror(wait_result) << "\n";
+        return 1;
+    }
+    network.stop();
+    std::cout << "[" << cfg.node_name << "] detenido\n";
     return 0;
 }
