@@ -11,10 +11,11 @@
 #include <string>
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "Uso: " << argv[0] << " <IPv4> <puerto>\n";
+    if (argc < 3 || argc > 4 || (argc == 4 && std::string(argv[3]) != "--nodes")) {
+        std::cerr << "Uso: " << argv[0] << " <IPv4> <puerto> [--nodes]\n";
         return 1;
     }
+    const bool list_nodes = argc == 4;
 
     int port = 0;
     try {
@@ -57,7 +58,8 @@ int main(int argc, char** argv) {
     MessageHeader request{};
     request.magic = DSM_MAGIC;
     request.version = DSM_PROTOCOL_VERSION;
-    request.type = static_cast<uint16_t>(MessageType::STATUS_REQUEST);
+    request.type = static_cast<uint16_t>(list_nodes ? MessageType::NODE_LIST_REQUEST :
+                                                    MessageType::STATUS_REQUEST);
     request.message_id = 1;
 
     MessageHeader response{};
@@ -70,12 +72,27 @@ int main(int argc, char** argv) {
         std::cerr << "Error consultando estado: " << error << "\n";
         return 1;
     }
-    if (response.type != static_cast<uint16_t>(MessageType::STATUS_RESPONSE) ||
+    const auto expected = list_nodes ? MessageType::NODE_LIST_RESPONSE : MessageType::STATUS_RESPONSE;
+    if (response.type != static_cast<uint16_t>(expected) ||
         response.message_id != request.message_id) {
         std::cerr << "Respuesta de estado inesperada\n";
         return 1;
     }
 
-    std::cout << "STATUS_RESPONSE\n" << std::string(payload.begin(), payload.end());
+    if (list_nodes) {
+        std::vector<NodeInfo> nodes;
+        if (!deserialize_nodes(payload, nodes, error)) {
+            std::cerr << "Lista de nodos invalida: " << error << "\n";
+            return 1;
+        }
+        std::cout << "NODE_LIST_RESPONSE (" << nodes.size() << " nodos)\n";
+        for (const auto& node : nodes) {
+            std::cout << node.id << "\t" << node.node_name << "\t"
+                      << node.ip_address << ":" << node.tcp_port
+                      << "\t" << node.memory_size << " bytes\n";
+        }
+    } else {
+        std::cout << "STATUS_RESPONSE\n" << std::string(payload.begin(), payload.end());
+    }
     return 0;
 }

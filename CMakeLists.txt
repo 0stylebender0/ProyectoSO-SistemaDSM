@@ -10,6 +10,7 @@ add_executable(dsm_node
     src/config.cpp
     src/memory_manager.cpp
     src/network.cpp
+    src/node.cpp
     src/protocol.cpp
 )
 
@@ -24,21 +25,32 @@ enable_testing()
 add_executable(test_protocol
     tests/test_protocol.cpp
     src/protocol.cpp
+    src/node.cpp
 )
 
 target_include_directories(test_protocol PRIVATE include)
 target_compile_options(test_protocol PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_protocol PRIVATE Threads::Threads)
 
 add_test(NAME protocol COMMAND test_protocol)
 
-add_executable(dsm_status apps/status_client.cpp src/protocol.cpp)
+add_executable(dsm_status apps/status_client.cpp src/protocol.cpp src/node.cpp)
 target_include_directories(dsm_status PRIVATE include)
 target_compile_options(dsm_status PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm_status PRIVATE Threads::Threads)
 
-add_executable(test_network tests/test_network.cpp src/network.cpp src/protocol.cpp)
+add_executable(test_network tests/test_network.cpp src/network.cpp src/protocol.cpp src/node.cpp)
 target_include_directories(test_network PRIVATE include)
 target_compile_options(test_network PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_network PRIVATE Threads::Threads)
 
 add_test(NAME network COMMAND test_network)
 set_tests_properties(network PROPERTIES TIMEOUT 20)
+
+add_executable(test_membership tests/test_membership.cpp src/network.cpp src/protocol.cpp src/node.cpp)
+target_include_directories(test_membership PRIVATE include)
+target_compile_options(test_membership PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_membership PRIVATE Threads::Threads)
+
+add_test(NAME membership COMMAND test_membership)
+set_tests_properties(membership PROPERTIES TIMEOUT 30)

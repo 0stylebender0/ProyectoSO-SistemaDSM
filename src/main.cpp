@@ -127,6 +127,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
+    std::cout << "[" << cfg.node_name << "] node id\t\t\t" << network.node_id() << "\n";
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
     std::cout << "[" << cfg.node_name << "] tcp\t\t\t" << cfg.tcp_port << "\n";
     std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << cfg.heartbeat_port << "\n";

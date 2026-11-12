@@ -62,6 +62,7 @@ bool query_status(int fd, uint16_t port, uint64_t message_id) {
     const std::string expected = "node_name=test_node\ntcp_port=" +
         std::to_string(port) + "\nworker_count=2\n";
     return response.type == static_cast<uint16_t>(MessageType::STATUS_RESPONSE) &&
+           response.sender_id != 0 &&
            response.message_id == message_id && response.receiver_id == 42 &&
            std::string(payload.begin(), payload.end()) == expected;
 }

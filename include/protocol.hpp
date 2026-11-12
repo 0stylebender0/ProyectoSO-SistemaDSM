@@ -1,5 +1,7 @@
 #pragma once
 
+#include "node.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -80,3 +82,8 @@ bool recv_message(
     std::vector<uint8_t>& payload,
     std::string& error
 );
+
+bool serialize_nodes(const std::vector<NodeInfo>& nodes,
+                     std::vector<uint8_t>& out, std::string& error);
+bool deserialize_nodes(const std::vector<uint8_t>& data,
+                       std::vector<NodeInfo>& out, std::string& error);
