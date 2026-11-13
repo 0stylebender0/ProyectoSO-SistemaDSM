@@ -89,7 +89,8 @@ int main(int argc, char** argv) {
         for (const auto& node : nodes) {
             std::cout << node.id << "\t" << node.node_name << "\t"
                       << node.ip_address << ":" << node.tcp_port
-                      << "\t" << node.memory_size << " bytes\n";
+                      << "\t" << node.memory_size << " bytes / "
+                      << node.memory_size / (1024.0 * 1024.0) << " MB\n";
         }
     } else {
         std::cout << "STATUS_RESPONSE\n" << std::string(payload.begin(), payload.end());
