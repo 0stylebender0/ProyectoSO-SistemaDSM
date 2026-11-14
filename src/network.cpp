@@ -165,6 +165,7 @@ bool NetworkManager::start(std::string& error) {
 }
 
 void NetworkManager::stop() {
+    leave();
     pthread_mutex_lock(&mutex_);
     running_ = false;
     // Desbloquea recv/send antes de esperar a los workers.
@@ -291,6 +292,17 @@ void NetworkManager::handle_connection(int fd) {
             if (!handle_join(fd, request, payload, error)) return;
             continue;
         }
+        if (request.type == static_cast<uint16_t>(MessageType::NODE_LEAVE)) {
+            if (!payload.empty() || request.sender_id == 0 || request.sender_id == node_id_) {
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                continue;
+            }
+            node_table_.remove(request.sender_id);
+            const MessageHeader response = make_header(MessageType::NODE_LEAVE_ACK,
+                request.message_id, node_id_, request.sender_id);
+            if (!send_message(fd, response, {}, error)) return;
+            continue;
+        }
         if (request.type == static_cast<uint16_t>(MessageType::NODE_ANNOUNCE)) {
             std::vector<NodeInfo> announced;
             bool inserted = false;
@@ -337,6 +349,38 @@ NodeInfo NetworkManager::local_node() const {
     NodeInfo node;
     node_table_.find(node_id_, node);
     return node;
+}
+
+void NetworkManager::leave() {
+    pthread_mutex_lock(&mutex_);
+    const bool running = running_;
+    pthread_mutex_unlock(&mutex_);
+    if (!running) return;
+
+    // Los workers siguen activos para confirmar salidas simultaneas.
+    for (const auto& peer : nodes()) {
+        if (peer.id == node_id_) continue;
+        std::string error;
+        const int fd = connect_to(peer.ip_address, peer.tcp_port, error);
+        bool confirmed = false;
+        if (fd != -1) {
+            const MessageHeader request = make_header(MessageType::NODE_LEAVE,
+                next_message_++, node_id_, peer.id);
+            MessageHeader response{};
+            std::vector<uint8_t> payload;
+            confirmed = send_message(fd, request, {}, error) &&
+                        recv_message(fd, response, payload, error) &&
+                        response.type == static_cast<uint16_t>(MessageType::NODE_LEAVE_ACK) &&
+                        response.message_id == request.message_id &&
+                        response.sender_id == peer.id && response.receiver_id == node_id_ &&
+                        payload.empty();
+            close_outgoing(fd);
+        }
+        if (!confirmed) {
+            std::cerr << "[" << config_.node_name << "] no se confirmo la salida en "
+                      << peer.node_name << "\n";
+        }
+    }
 }
 
 int NetworkManager::connect_to(const std::string& host, uint16_t port, std::string& error) {

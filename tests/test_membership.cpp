@@ -200,6 +200,17 @@ int main() {
               response.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE) &&
               payload == std::vector<uint8_t>({0, 1}) && a.nodes().size() == 5,
               "rechazar JOIN_REQUEST sin informacion de nodo");
+        request.type = static_cast<uint16_t>(MessageType::NODE_LEAVE);
+        request.sender_id = b.node_id();
+        check(send_message(fd, request, {0}, error) &&
+              recv_message(fd, response, payload, error) &&
+              response.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE) &&
+              a.nodes().size() == 5, "rechazar salida con payload sin borrar al participante");
+        request.sender_id = a.node_id();
+        check(send_message(fd, request, {}, error) &&
+              recv_message(fd, response, payload, error) &&
+              response.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE) &&
+              a.nodes().size() == 5, "impedir que un mensaje elimine al nodo local");
         close(fd);
     }
 
@@ -222,6 +233,10 @@ int main() {
         if (node.id == bound.node_id()) address_found = node.ip_address == "127.0.0.2";
     }
     check(address_found, "anunciar una direccion donde el nodo realmente escucha");
+
+    bound.stop();
+    check(wait_for_membership({&a, &b, &c, &d, &e}),
+          "eliminar al nodo que sale con un solo worker por participante");
 
     if (failures == 0) {
         std::cout << "test_membership: OK\n";

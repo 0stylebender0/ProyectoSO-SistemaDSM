@@ -107,6 +107,11 @@ std::vector<NodeInfo> NodeTable::snapshot() const {
     return result;
 }
 
+bool NodeTable::remove(NodeId id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return nodes_.erase(id) != 0;
+}
+
 void NodeTable::update_address(NodeId id, const std::string& address) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = nodes_.find(id);

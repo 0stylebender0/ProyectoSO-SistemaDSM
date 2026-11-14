@@ -54,3 +54,14 @@ target_link_libraries(test_membership PRIVATE Threads::Threads)
 
 add_test(NAME membership COMMAND test_membership)
 set_tests_properties(membership PROPERTIES TIMEOUT 30)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME console COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/tests/test_console.py"
+        "$<TARGET_FILE:dsm_node>" "$<TARGET_FILE:dsm_status>"
+        "${CMAKE_SOURCE_DIR}/config/dsm.conf"
+        "${CMAKE_SOURCE_DIR}/scripts/demo_local.sh"
+    )
+    set_tests_properties(console PROPERTIES TIMEOUT 40)
+endif()

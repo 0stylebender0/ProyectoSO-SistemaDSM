@@ -42,6 +42,8 @@ enum class MessageType : uint16_t {
     STATUS_RESPONSE     = 12,
     ERROR_RESPONSE      = 13,
     HEARTBEAT           = 14,
+    NODE_LEAVE          = 15,
+    NODE_LEAVE_ACK      = 16,
 };
 
 enum class ErrorCode : uint16_t {

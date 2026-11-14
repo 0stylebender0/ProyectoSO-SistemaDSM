@@ -39,6 +39,7 @@ private:
                      const std::vector<uint8_t>& payload, std::string& error);
     bool send_error(int fd, const MessageHeader& request, ErrorCode code, std::string& error);
     void announce(const NodeInfo& node, const std::vector<NodeInfo>& targets, NodeId except = 0);
+    void leave();
     int connect_to(const std::string& host, uint16_t port, std::string& error);
     void close_outgoing(int fd);
     NodeInfo local_node() const;

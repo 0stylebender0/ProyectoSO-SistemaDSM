@@ -26,6 +26,7 @@ public:
     bool add(const NodeInfo& node, std::string& error, bool* inserted = nullptr);
     bool merge(const std::vector<NodeInfo>& nodes, std::string& error);
     bool find(NodeId id, NodeInfo& out) const;
+    bool remove(NodeId id);
     std::vector<NodeInfo> snapshot() const;
     void update_address(NodeId id, const std::string& address);
     void clear();
