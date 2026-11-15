@@ -109,7 +109,7 @@ static void print_nodes(const Config& cfg, const NetworkManager& network) {
     }
 }
 
-void print_info(Config& cfg, MemoryManager& memory, NetworkManager& network, CliOptions& opt) {
+void print_info(const Config& cfg, const MemoryManager& memory, const NetworkManager& network, const CliOptions& opt) {
     std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
     std::cout << "[" << cfg.node_name << "] node id\t\t\t" << network.node_id() << "\n";
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
@@ -125,12 +125,12 @@ void print_info(Config& cfg, MemoryManager& memory, NetworkManager& network, Cli
 
     std::cout << "[" << cfg.node_name << "] escuchando TCP en "
               << cfg.bind_address << ":" << network.port()
-              << " con " << cfg.worker_count << " workers (Ctrl+C para salir)\n"
+              << " con " << cfg.worker_count << " workers\n"
               << std::flush;
 }
 
 static bool handle_command(const std::string& line, const Config& cfg,
-                           const MemoryManager& memory, const NetworkManager& network) {
+                           const MemoryManager& memory, const NetworkManager& network, const CliOptions& opt) {
     const std::size_t begin = line.find_first_not_of(" \t\r");
     if (begin == std::string::npos) return true;
     const std::size_t end = line.find_last_not_of(" \t\r");
@@ -142,16 +142,18 @@ static bool handle_command(const std::string& line, const Config& cfg,
         print_memory(cfg, memory);
     } else if (command == "quit") {
         return false;
+    } else if (command == "info") {
+        print_info(cfg, memory, network, opt);
     } else {
         std::cout << "Comando desconocido: " << command << "\n"
-                  << "Comandos: nodes, memory, quit\n";
+                  << "Comandos: nodes, memory, info, quit\n";
     }
     std::cout << std::flush;
     return true;
 }
 
 static bool run_console(const Config& cfg, const MemoryManager& memory,
-                        const NetworkManager& network, const sigset_t& signals) {
+                        const NetworkManager& network, const sigset_t& signals, const CliOptions& opt) {
     const int signal_fd = signalfd(-1, &signals, SFD_CLOEXEC);
     if (signal_fd == -1) {
         std::cerr << "Error configurando consola: " << std::strerror(errno) << "\n";
@@ -161,7 +163,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
     std::string pending;
     bool running = true;
     bool ok = true;
-    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, quit\n" << std::flush;
+    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, info, quit\n" << std::flush;
 
     while (running) {
         if (poll(inputs, 2, -1) == -1) {
@@ -194,7 +196,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
             break;
         }
         if (count == 0) {
-            if (!pending.empty()) running = handle_command(pending, cfg, memory, network);
+            if (!pending.empty()) running = handle_command(pending, cfg, memory, network, opt);
             // Sin stdin el nodo sigue atendiendo TCP hasta recibir una senal.
             inputs[0].fd = -1;
             continue;
@@ -204,7 +206,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
         while ((newline = pending.find('\n')) != std::string::npos) {
             const std::string line = pending.substr(0, newline);
             pending.erase(0, newline + 1);
-            if (!handle_command(line, cfg, memory, network)) {
+            if (!handle_command(line, cfg, memory, network, opt)) {
                 running = false;
                 break;
             }
@@ -280,9 +282,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    print_info(cfg, memory, network, opt);
-
-    const bool ok = run_console(cfg, memory, network, signals);
+    const bool ok = run_console(cfg, memory, network, signals, opt);
     network.stop();
     std::cout << "[" << cfg.node_name << "] detenido\n";
     return ok ? 0 : 1;
