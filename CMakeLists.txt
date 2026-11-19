@@ -9,6 +9,8 @@ add_executable(dsm_node
     src/main.cpp
     src/config.cpp
     src/memory_manager.cpp
+    src/fault_queue.cpp
+    src/signal_handler.cpp
     src/network.cpp
     src/node.cpp
     src/protocol.cpp
@@ -54,6 +56,14 @@ target_link_libraries(test_membership PRIVATE Threads::Threads)
 
 add_test(NAME membership COMMAND test_membership)
 set_tests_properties(membership PROPERTIES TIMEOUT 30)
+
+add_executable(test_fault tests/test_fault.cpp src/memory_manager.cpp src/fault_queue.cpp src/signal_handler.cpp)
+target_include_directories(test_fault PRIVATE include)
+target_compile_options(test_fault PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_fault PRIVATE Threads::Threads)
+
+add_test(NAME fault COMMAND test_fault)
+set_tests_properties(fault PROPERTIES TIMEOUT 20)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

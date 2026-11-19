@@ -47,9 +47,12 @@ def start_node(directory, name, port=None, bootstrap=None):
     def ready():
         output = log_path.read_text()
         assert process.poll() is None, output
-        return "comandos: nodes, memory, quit" in output
+        return f"[{name}] comandos:" in output
 
     wait_for(ready, f"El nodo {name} no inicio")
+    process.stdin.write("info\n")
+    process.stdin.flush()
+    wait_for(lambda: "mmap base" in log_path.read_text(), f"El nodo {name} no mostro su informacion")
     return process, log_path, port
 
 

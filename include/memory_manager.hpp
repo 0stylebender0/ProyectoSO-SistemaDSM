@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+using PageId = uint64_t;
+
 class MemoryManager {
 public:
     MemoryManager(uint64_t size, uint32_t page_size);
@@ -12,6 +14,10 @@ public:
     MemoryManager& operator=(const MemoryManager&) = delete;
 
     bool reserve(std::string& error);
+    void* page_address(PageId page_id) const;
+    // Devuelve UINT64_MAX si la direccion no pertenece a esta reserva.
+    PageId page_id_from_address(const void* address) const;
+    bool protect_page(PageId page_id, int prot, std::string& error);
 
     void*    base()       const { return base_; }
     uint64_t size()       const { return size_; }

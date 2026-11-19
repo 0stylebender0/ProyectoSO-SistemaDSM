@@ -61,7 +61,7 @@ for i in 0 1 2; do
             cat "$demo_dir/$name.log" >&2
             exit 1
         fi
-        if grep -q 'comandos: nodes, memory, quit' "$demo_dir/$name.log"; then
+        if grep -q "\[$name\] comandos:" "$demo_dir/$name.log"; then
             ready=true
             break
         fi
@@ -94,7 +94,7 @@ if [[ $complete != true ]]; then
 fi
 
 for i in 0 1 2; do
-    printf 'nodes\nmemory\n' >&"${inputs[$i]}"
+    printf 'info\nnodes\nmemory\n' >&"${inputs[$i]}"
 done
 # Todos consultan la tabla antes de que el primero anuncie su salida.
 for i in 0 1 2; do

@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "memory_manager.hpp"
 #include "network.hpp"
+#include "signal_handler.hpp"
 
 #include <pthread.h>
 #include <poll.h>
@@ -273,6 +274,12 @@ int main(int argc, char** argv) {
     const int mask_result = pthread_sigmask(SIG_BLOCK, &signals, nullptr);
     if (mask_result != 0) {
         std::cerr << "Error configurando senales: " << std::strerror(mask_result) << "\n";
+        return 1;
+    }
+
+    SignalHandler faults(memory);
+    if (!faults.start(error)) {
+        std::cerr << "Error iniciando manejo de fallos: " << error << "\n";
         return 1;
     }
 
