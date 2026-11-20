@@ -13,6 +13,8 @@ add_executable(dsm_node
     src/signal_handler.cpp
     src/network.cpp
     src/node.cpp
+    src/pager.cpp
+    src/dsm_node.cpp
     src/protocol.cpp
 )
 
@@ -64,6 +66,20 @@ target_link_libraries(test_fault PRIVATE Threads::Threads)
 
 add_test(NAME fault COMMAND test_fault)
 set_tests_properties(fault PROPERTIES TIMEOUT 20)
+
+add_executable(test_pager
+    tests/test_pager.cpp
+    src/pager.cpp
+    src/memory_manager.cpp
+    src/fault_queue.cpp
+    src/signal_handler.cpp
+)
+target_include_directories(test_pager PRIVATE include)
+target_compile_options(test_pager PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_pager PRIVATE Threads::Threads)
+
+add_test(NAME pager COMMAND test_pager)
+set_tests_properties(pager PROPERTIES TIMEOUT 20)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

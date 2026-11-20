@@ -5,7 +5,11 @@
 #include <pthread.h>
 #include <signal.h>
 
+#include <functional>
+#include <string>
 #include <vector>
+
+using FaultCallback = std::function<bool(PageId, bool, std::string&)>;
 
 // Se prepara y destruye en el mismo hilo que accede a la memoria DSM.
 class FaultThread {
@@ -28,7 +32,7 @@ private:
 
 class SignalHandler {
 public:
-    explicit SignalHandler(MemoryManager& memory);
+    explicit SignalHandler(MemoryManager& memory, FaultCallback callback = {});
     ~SignalHandler();
 
     SignalHandler(const SignalHandler&) = delete;
@@ -46,6 +50,7 @@ private:
     void resolve_faults();
 
     MemoryManager& memory_;
+    FaultCallback callback_;
     FaultQueue queue_;
     FaultThread thread_;
     std::vector<int> permissions_;

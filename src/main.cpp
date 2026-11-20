@@ -1,6 +1,8 @@
 #include "config.hpp"
+#include "dsm_node.hpp"
 #include "memory_manager.hpp"
 #include "network.hpp"
+#include "node.hpp"
 #include "signal_handler.hpp"
 
 #include <pthread.h>
@@ -9,6 +11,7 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <iomanip>
@@ -85,6 +88,46 @@ static void print_memory(const Config& cfg, const MemoryManager& memory) {
               << " (PROT_NONE)\n";
 }
 
+static void print_pages(const Config& cfg, const Pager& pager) {
+    const auto regions = pager.region_snapshot();
+    auto pages = pager.page_snapshot();
+    std::sort(pages.begin(), pages.end(),
+              [](const PageInfo& a, const PageInfo& b) { return a.page_id < b.page_id; });
+
+    std::size_t invalid = 0;
+    std::size_t shared = 0;
+    std::size_t modified = 0;
+    for (const auto& page : pages) {
+        switch (page.state) {
+            case MSIState::INVALID:  ++invalid;  break;
+            case MSIState::SHARED:   ++shared;   break;
+            case MSIState::MODIFIED: ++modified; break;
+        }
+    }
+
+    std::cout << "[" << cfg.node_name << "] regiones\t\t" << regions.size()
+              << ", paginas locales: " << pages.size() << "\n";
+    std::cout << "[" << cfg.node_name << "] estados MSI\t\tI=" << invalid
+              << " S=" << shared << " M=" << modified << "\n";
+
+    if (pages.empty()) return;
+
+    std::cout << std::right << std::setw(10) << "PageId" << "  "
+              << std::setw(10) << "RegionId" << "  "
+              << std::setw(20) << "Owner" << "  "
+              << std::left << std::setw(10) << "Estado" << "  "
+              << std::setw(9) << "Presente" << "  "
+              << "Version\n";
+    for (const auto& page : pages) {
+        std::cout << std::right << std::setw(10) << page.page_id << "  "
+                  << std::setw(10) << page.region_id << "  "
+                  << std::setw(20) << page.owner_id << "  "
+                  << std::left << std::setw(10) << msi_state_name(page.state) << "  "
+                  << std::setw(9) << (page.locally_present ? "si" : "no") << "  "
+                  << page.version << "\n";
+    }
+}
+
 static void print_nodes(const Config& cfg, const NetworkManager& network) {
     const auto nodes = network.nodes();
     std::size_t name_width = std::string("Nombre").size();
@@ -110,7 +153,8 @@ static void print_nodes(const Config& cfg, const NetworkManager& network) {
     }
 }
 
-void print_info(const Config& cfg, const MemoryManager& memory, const NetworkManager& network, const CliOptions& opt) {
+void print_info(const Config& cfg, const MemoryManager& memory, const NetworkManager& network,
+                const Pager& pager, const CliOptions& opt) {
     std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
     std::cout << "[" << cfg.node_name << "] node id\t\t\t" << network.node_id() << "\n";
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
@@ -119,6 +163,7 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
     std::cout << "[" << cfg.node_name << "] control\t\t\t" << cfg.control_port << "\n";
 
     print_memory(cfg, memory);
+    print_pages(cfg, pager);
 
     std::cout << "[" << cfg.node_name << "] bootstrap\t\t"
               << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
@@ -131,7 +176,8 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
 }
 
 static bool handle_command(const std::string& line, const Config& cfg,
-                           const MemoryManager& memory, const NetworkManager& network, const CliOptions& opt) {
+                           const MemoryManager& memory, const NetworkManager& network,
+                           const Pager& pager, const CliOptions& opt) {
     const std::size_t begin = line.find_first_not_of(" \t\r");
     if (begin == std::string::npos) return true;
     const std::size_t end = line.find_last_not_of(" \t\r");
@@ -141,20 +187,23 @@ static bool handle_command(const std::string& line, const Config& cfg,
         print_nodes(cfg, network);
     } else if (command == "memory") {
         print_memory(cfg, memory);
+    } else if (command == "pages") {
+        print_pages(cfg, pager);
     } else if (command == "quit") {
         return false;
     } else if (command == "info") {
-        print_info(cfg, memory, network, opt);
+        print_info(cfg, memory, network, pager, opt);
     } else {
         std::cout << "Comando desconocido: " << command << "\n"
-                  << "Comandos: nodes, memory, info, quit\n";
+                  << "Comandos: nodes, memory, pages, info, quit\n";
     }
     std::cout << std::flush;
     return true;
 }
 
 static bool run_console(const Config& cfg, const MemoryManager& memory,
-                        const NetworkManager& network, const sigset_t& signals, const CliOptions& opt) {
+                        const NetworkManager& network, const Pager& pager,
+                        const sigset_t& signals, const CliOptions& opt) {
     const int signal_fd = signalfd(-1, &signals, SFD_CLOEXEC);
     if (signal_fd == -1) {
         std::cerr << "Error configurando consola: " << std::strerror(errno) << "\n";
@@ -164,7 +213,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
     std::string pending;
     bool running = true;
     bool ok = true;
-    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, info, quit\n" << std::flush;
+    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, pages, info, quit\n" << std::flush;
 
     while (running) {
         if (poll(inputs, 2, -1) == -1) {
@@ -197,7 +246,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
             break;
         }
         if (count == 0) {
-            if (!pending.empty()) running = handle_command(pending, cfg, memory, network, opt);
+            if (!pending.empty()) running = handle_command(pending, cfg, memory, network, pager, opt);
             // Sin stdin el nodo sigue atendiendo TCP hasta recibir una senal.
             inputs[0].fd = -1;
             continue;
@@ -207,7 +256,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
         while ((newline = pending.find('\n')) != std::string::npos) {
             const std::string line = pending.substr(0, newline);
             pending.erase(0, newline + 1);
-            if (!handle_command(line, cfg, memory, network, opt)) {
+            if (!handle_command(line, cfg, memory, network, pager, opt)) {
                 running = false;
                 break;
             }
@@ -277,19 +326,30 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    SignalHandler faults(memory);
+    NodeId local_id = 0;
+    if (!generate_node_id(local_id, error)) {
+        std::cerr << "Error generando NodeId: " << error << "\n";
+        return 1;
+    }
+
+    NetworkManager network(cfg, local_id);
+    DSMNode node(memory, network, local_id);
+
+    SignalHandler faults(memory,
+        [&node](PageId page_id, bool write, std::string& fault_error) {
+            return node.pager().resolve_fault(page_id, write, fault_error);
+        });
     if (!faults.start(error)) {
         std::cerr << "Error iniciando manejo de fallos: " << error << "\n";
         return 1;
     }
 
-    NetworkManager network(cfg);
     if (!network.start(error)) {
         std::cerr << "Error iniciando red: " << error << "\n";
         return 1;
     }
 
-    const bool ok = run_console(cfg, memory, network, signals, opt);
+    const bool ok = run_console(cfg, memory, network, node.pager(), signals, opt);
     network.stop();
     std::cout << "[" << cfg.node_name << "] detenido\n";
     return ok ? 0 : 1;

@@ -68,7 +68,8 @@ namespace {
     }
 }
 
-NetworkManager::NetworkManager(const Config& config) : config_(config) {}
+NetworkManager::NetworkManager(const Config& config, NodeId node_id)
+    : config_(config), node_id_hint_(node_id) {}
 
 NetworkManager::~NetworkManager() {
     stop();
@@ -118,7 +119,9 @@ bool NetworkManager::start(std::string& error) {
     }
     port_ = ntohs(address.sin_port);
 
-    if (!generate_node_id(node_id_, error)) {
+    if (node_id_hint_ != 0) {
+        node_id_ = node_id_hint_;
+    } else if (!generate_node_id(node_id_, error)) {
         stop();
         return false;
     }

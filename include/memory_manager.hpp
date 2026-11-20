@@ -1,9 +1,9 @@
 #pragma once
 
+#include "page.hpp"
+
 #include <cstdint>
 #include <string>
-
-using PageId = uint64_t;
 
 class MemoryManager {
 public:

@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <utility>
 
 namespace {
     std::atomic<SignalHandler*> active{nullptr};
@@ -66,7 +67,8 @@ void FaultThread::reset() {
     pthread_sigmask(SIG_SETMASK, &previous_mask_, nullptr);
 }
 
-SignalHandler::SignalHandler(MemoryManager& memory) : memory_(memory) {}
+SignalHandler::SignalHandler(MemoryManager& memory, FaultCallback callback)
+    : memory_(memory), callback_(std::move(callback)) {}
 
 SignalHandler::~SignalHandler() {
     stop();
@@ -190,13 +192,20 @@ void SignalHandler::resolve_faults() {
     FaultEvent event;
     while (queue_.pop(event)) {
         if (event.tid == 0) return;
-        int& permissions = permissions_[event.page_id];
-        // Una lectura pendiente no debe quitar escritura habilitada por otro fallo.
-        permissions |= PROT_READ | (event.write ? PROT_WRITE : 0);
         std::string error;
-        if (!memory_.protect_page(event.page_id, permissions, error)) {
-            std::cerr << "Error resolviendo fallo DSM: " << error << "\n";
-            _exit(1);
+        if (callback_) {
+            if (!callback_(event.page_id, event.write, error)) {
+                std::cerr << "Error resolviendo fallo DSM: " << error << "\n";
+                _exit(1);
+            }
+        } else {
+            int& permissions = permissions_[event.page_id];
+            // Una lectura pendiente no debe quitar escritura habilitada por otro fallo.
+            permissions |= PROT_READ | (event.write ? PROT_WRITE : 0);
+            if (!memory_.protect_page(event.page_id, permissions, error)) {
+                std::cerr << "Error resolviendo fallo DSM: " << error << "\n";
+                _exit(1);
+            }
         }
         if (syscall(SYS_tgkill, pid_, event.tid, SIGUSR1) == -1) {
             std::cerr << "Error despertando hilo DSM: " << std::strerror(errno) << "\n";

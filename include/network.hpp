@@ -14,7 +14,7 @@
 
 class NetworkManager {
 public:
-    explicit NetworkManager(const Config& config);
+    explicit NetworkManager(const Config& config, NodeId node_id = 0);
     ~NetworkManager();
 
     NetworkManager(const NetworkManager&) = delete;
@@ -47,6 +47,7 @@ private:
     Config config_;
     int listen_fd_ = -1;
     uint16_t port_ = 0;
+    NodeId node_id_hint_ = 0;
     NodeId node_id_ = 0;
     NodeTable node_table_;
     std::atomic<uint64_t> next_message_{1};
