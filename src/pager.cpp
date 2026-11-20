@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace {
     uint64_t round_up(uint64_t value, uint64_t multiple) {
@@ -41,6 +42,10 @@ namespace {
 
 Pager::Pager(MemoryManager& memory, NodeId local_id)
     : memory_(memory), local_id_(local_id) {}
+
+void Pager::set_page_fetcher(PageFetcher fetcher) {
+    fetcher_ = std::move(fetcher);
+}
 
 bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error) {
     if (size == 0) {
@@ -170,27 +175,7 @@ bool Pager::attach_locked(const RegionDescriptor& descriptor, uint64_t first_pag
     return true;
 }
 
-bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (page_id >= memory_.page_count()) {
-        error = "pagina fuera de la memoria reservada";
-        return false;
-    }
-
-    const auto found = pages_.find(page_id);
-    if (found == pages_.end()) {
-        error = "pagina desconocida: " + std::to_string(page_id);
-        return false;
-    }
-
-    PageInfo& page = found->second;
-
-    if (page.owner_id != local_id_) {
-        error = "pagina remota sin soporte de transferencia (hito 2.4)";
-        return false;
-    }
-
+bool Pager::resolve_owner_locked(PageInfo& page, bool write, std::string& error) {
     MSIState next_state = page.state;
     uint64_t next_version = page.version;
     int permissions = PROT_READ;
@@ -223,13 +208,188 @@ bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
             break;
     }
 
-    if (!memory_.protect_page(page_id, permissions, error)) {
+    if (!memory_.protect_page(page.page_id, permissions, error)) {
         return false;
     }
 
     page.state = next_state;
     page.version = next_version;
     page.locally_present = true;
+    return true;
+}
+
+bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
+    RemotePageQuery query;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (page_id >= memory_.page_count()) {
+            error = "pagina fuera de la memoria reservada";
+            return false;
+        }
+
+        const auto found = pages_.find(page_id);
+        if (found == pages_.end()) {
+            error = "pagina desconocida: " + std::to_string(page_id);
+            return false;
+        }
+
+        PageInfo& page = found->second;
+        if (page.owner_id == local_id_) {
+            return resolve_owner_locked(page, write, error);
+        }
+
+        // La escritura remota con invalidacion pertenece al hito 2.5.
+        if (write) {
+            error = "escritura remota sin soporte de invalidacion (hito 2.5)";
+            return false;
+        }
+        if (!fetcher_) {
+            error = "no hay fetcher configurado para paginas remotas";
+            return false;
+        }
+
+        const auto region = regions_.find(page.region_id);
+        if (region == regions_.end() ||
+            page_id < region->second.first_page ||
+            page_id >= region->second.first_page + region->second.page_count ||
+            region->second.descriptor.owner_id != page.owner_id) {
+            error = "la pagina remota no pertenece a una region conocida";
+            return false;
+        }
+
+        query.page_id = page_id;
+        query.region_id = page.region_id;
+        query.region_offset = page_id - region->second.first_page;
+        query.owner_id = region->second.descriptor.owner_id;
+        query.current_state = page.state;
+        query.known_version = page.version;
+        query.write = false;
+    }
+
+    // La red no se ejecuta con mutex_ tomado.
+    PageData response;
+    if (!fetcher_(query, response, error)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pages_.find(page_id);
+    if (found == pages_.end()) {
+        error = "la pagina local desaparecio durante la transferencia";
+        return false;
+    }
+
+    PageInfo& page = found->second;
+    if (page.owner_id == local_id_) {
+        error = "la pagina cambio de dueno durante la transferencia";
+        return false;
+    }
+    if (page.locally_present && page.state != MSIState::INVALID) {
+        // Otro hilo ya materializo la pagina mientras esperabamos la red.
+        return true;
+    }
+    if (response.page_id != query.page_id ||
+        response.region_id != query.region_id ||
+        response.region_offset != query.region_offset ||
+        response.state != static_cast<uint8_t>(MSIState::SHARED)) {
+        error = "PAGE_DATA no corresponde a la pagina solicitada";
+        return false;
+    }
+
+    const uint64_t page_size = memory_.page_size();
+    if (response.data.size() != page_size) {
+        error = "PAGE_DATA con tamano de pagina invalido";
+        return false;
+    }
+    void* address = memory_.page_address(page_id);
+    if (address == nullptr) {
+        error = "pagina fuera de la memoria reservada";
+        return false;
+    }
+    if (!memory_.protect_page(page_id, PROT_READ | PROT_WRITE, error)) {
+        return false;
+    }
+    std::memcpy(address, response.data.data(), static_cast<std::size_t>(page_size));
+    if (!memory_.protect_page(page_id, PROT_READ, error)) {
+        return false;
+    }
+
+    page.state = MSIState::SHARED;
+    page.version = response.version;
+    page.locally_present = true;
+    return true;
+}
+
+bool Pager::serve_page_request(const PageRequest& request, NodeId requester,
+                               PageData& response, std::string& error) {
+    if (request.access_type != 0) {
+        error = "la escritura remota se implementa en el hito 2.5";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    const auto region = regions_.find(request.region_id);
+    if (region == regions_.end()) {
+        error = "region desconocida: " + std::to_string(request.region_id);
+        return false;
+    }
+    if (region->second.descriptor.owner_id != local_id_) {
+        error = "la region no pertenece al nodo local";
+        return false;
+    }
+    if (request.region_offset >= region->second.page_count) {
+        error = "region_offset fuera de la region";
+        return false;
+    }
+
+    const PageId page_id = region->second.first_page + request.region_offset;
+    const auto found = pages_.find(page_id);
+    if (found == pages_.end()) {
+        error = "pagina desconocida: " + std::to_string(page_id);
+        return false;
+    }
+
+    PageInfo& page = found->second;
+    const uint64_t page_size = memory_.page_size();
+
+    if (!page.locally_present || page.state == MSIState::INVALID) {
+        if (!memory_.protect_page(page_id, PROT_READ | PROT_WRITE, error)) {
+            return false;
+        }
+        std::memset(memory_.page_address(page_id), 0, static_cast<std::size_t>(page_size));
+        if (!memory_.protect_page(page_id, PROT_READ, error)) {
+            return false;
+        }
+        page.state = MSIState::SHARED;
+        page.locally_present = true;
+    } else if (page.state == MSIState::MODIFIED) {
+        // Al compartir, el dueno deja de tener acceso exclusivo de escritura.
+        if (!memory_.protect_page(page_id, PROT_READ, error)) {
+            return false;
+        }
+        page.state = MSIState::SHARED;
+    } else {
+        if (!memory_.protect_page(page_id, PROT_READ, error)) {
+            return false;
+        }
+        page.locally_present = true;
+    }
+
+    if (requester != 0 && requester != local_id_) {
+        page.sharers.insert(requester);
+    }
+
+    response.page_id = request.page_id;
+    response.region_id = request.region_id;
+    response.region_offset = request.region_offset;
+    response.version = page.version;
+    response.state = static_cast<uint8_t>(MSIState::SHARED);
+    response.data_size = static_cast<uint32_t>(page_size);
+    response.data.resize(static_cast<std::size_t>(page_size));
+    std::memcpy(response.data.data(), memory_.page_address(page_id),
+                static_cast<std::size_t>(page_size));
     return true;
 }
 

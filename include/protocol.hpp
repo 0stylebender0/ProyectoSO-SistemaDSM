@@ -1,6 +1,6 @@
 #pragma once
 
-#include "node.hpp"
+#include "page.hpp"
 
 #include <array>
 #include <cstddef>
@@ -9,7 +9,7 @@
 #include <vector>
 
 constexpr uint32_t DSM_MAGIC = 0x44534D31u;  // "DSM1" en ASCII
-constexpr uint16_t DSM_PROTOCOL_VERSION = 1;
+constexpr uint16_t DSM_PROTOCOL_VERSION = 2;
 constexpr std::size_t DSM_HEADER_SIZE = 44;
 constexpr uint32_t DSM_MAX_PAYLOAD_SIZE = 1024u * 1024u;  // 1 MiB
 
@@ -44,6 +44,8 @@ enum class MessageType : uint16_t {
     HEARTBEAT           = 14,
     NODE_LEAVE          = 15,
     NODE_LEAVE_ACK      = 16,
+    REGION_INFO_REQUEST  = 17,
+    REGION_INFO_RESPONSE = 18,
 };
 
 enum class ErrorCode : uint16_t {
@@ -57,6 +59,39 @@ enum class ErrorCode : uint16_t {
     VERSION_MISMATCH   = 8,
     TIMEOUT            = 9,
     PROTOCOL_MISMATCH  = 10,
+};
+
+// PageId es local a cada nodo. En la red la identidad canonica de una pagina
+// es (region_id, region_offset); page_id solo sirve para correlacionar la
+// respuesta con la pagina local del solicitante.
+struct PageRequest {
+    PageId page_id = 0;
+    RegionId region_id = 0;
+    uint64_t region_offset = 0;
+    uint8_t access_type = 0;    // 0 = READ, 1 = WRITE
+    uint8_t current_state = 2;  // MSIState::INVALID
+    uint64_t known_version = 0;
+};
+
+struct PageData {
+    PageId page_id = 0;
+    RegionId region_id = 0;
+    uint64_t region_offset = 0;
+    uint64_t version = 0;
+    uint8_t state = 1;  // MSIState::SHARED
+    uint32_t data_size = 0;
+    std::vector<uint8_t> data;
+};
+
+struct RegionInfoRequest {
+    RegionId region_id = 0;
+};
+
+struct RegionInfoResponse {
+    RegionId region_id = 0;
+    NodeId owner_id = 0;
+    uint64_t size = 0;
+    uint32_t page_size = 0;
 };
 
 std::array<uint8_t, DSM_HEADER_SIZE> serialize_header(const MessageHeader& header);
@@ -89,3 +124,23 @@ bool serialize_nodes(const std::vector<NodeInfo>& nodes,
                      std::vector<uint8_t>& out, std::string& error);
 bool deserialize_nodes(const std::vector<uint8_t>& data,
                        std::vector<NodeInfo>& out, std::string& error);
+
+bool serialize_page_request(const PageRequest& request,
+                            std::vector<uint8_t>& out, std::string& error);
+bool deserialize_page_request(const std::vector<uint8_t>& data,
+                              PageRequest& out, std::string& error);
+
+bool serialize_page_data(const PageData& page,
+                         std::vector<uint8_t>& out, std::string& error);
+bool deserialize_page_data(const std::vector<uint8_t>& data,
+                           PageData& out, std::string& error);
+
+bool serialize_region_info_request(const RegionInfoRequest& request,
+                                   std::vector<uint8_t>& out, std::string& error);
+bool deserialize_region_info_request(const std::vector<uint8_t>& data,
+                                     RegionInfoRequest& out, std::string& error);
+
+bool serialize_region_info_response(const RegionInfoResponse& response,
+                                    std::vector<uint8_t>& out, std::string& error);
+bool deserialize_region_info_response(const std::vector<uint8_t>& data,
+                                      RegionInfoResponse& out, std::string& error);

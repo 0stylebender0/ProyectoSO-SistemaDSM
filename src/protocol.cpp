@@ -271,6 +271,7 @@ bool deserialize_nodes(const std::vector<uint8_t>& data,
         error = "lista de nodos incompleta o demasiado grande";
         return false;
     }
+
     const uint32_t count = read_u32(data.data());
     if (count > (data.size() - 4) / 30) {
         error = "cantidad de nodos no coincide con el mensaje";
@@ -316,5 +317,186 @@ bool deserialize_nodes(const std::vector<uint8_t>& data,
         return false;
     }
     out = std::move(nodes);
+    return true;
+}
+
+namespace {
+    constexpr std::size_t PAGE_REQUEST_SIZE = 8 + 8 + 8 + 1 + 1 + 8;
+    constexpr std::size_t PAGE_DATA_HEADER_SIZE = 8 + 8 + 8 + 8 + 1 + 4;
+    constexpr std::size_t REGION_INFO_REQUEST_SIZE = 8;
+    constexpr std::size_t REGION_INFO_RESPONSE_SIZE = 8 + 8 + 8 + 4;
+
+    bool valid_state(uint8_t state) {
+        return state <= static_cast<uint8_t>(MSIState::INVALID);
+    }
+}  // namespace
+
+bool serialize_page_request(const PageRequest& request,
+                            std::vector<uint8_t>& out, std::string& error) {
+    if (request.access_type > 1) {
+        error = "access_type de PageRequest invalido";
+        return false;
+    }
+    if (!valid_state(request.current_state)) {
+        error = "estado MSI de PageRequest invalido";
+        return false;
+    }
+
+    std::vector<uint8_t> bytes(PAGE_REQUEST_SIZE);
+    write_u64(bytes.data() + 0, request.page_id);
+    write_u64(bytes.data() + 8, request.region_id);
+    write_u64(bytes.data() + 16, request.region_offset);
+    bytes[24] = request.access_type;
+    bytes[25] = request.current_state;
+    write_u64(bytes.data() + 26, request.known_version);
+    out = std::move(bytes);
+    return true;
+}
+
+bool deserialize_page_request(const std::vector<uint8_t>& data,
+                              PageRequest& out, std::string& error) {
+    if (data.size() != PAGE_REQUEST_SIZE) {
+        error = "PageRequest con tamano invalido";
+        return false;
+    }
+    PageRequest request;
+    request.page_id = read_u64(data.data() + 0);
+    request.region_id = read_u64(data.data() + 8);
+    request.region_offset = read_u64(data.data() + 16);
+    request.access_type = data[24];
+    request.current_state = data[25];
+    request.known_version = read_u64(data.data() + 26);
+    if (request.access_type > 1) {
+        error = "access_type de PageRequest invalido";
+        return false;
+    }
+    if (!valid_state(request.current_state)) {
+        error = "estado MSI de PageRequest invalido";
+        return false;
+    }
+    out = request;
+    return true;
+}
+
+bool serialize_page_data(const PageData& page,
+                         std::vector<uint8_t>& out, std::string& error) {
+    if (!valid_state(page.state)) {
+        error = "estado MSI de PageData invalido";
+        return false;
+    }
+    if (page.data.size() > DSM_MAX_PAYLOAD_SIZE - PAGE_DATA_HEADER_SIZE) {
+        error = "contenido de PageData excede el maximo permitido";
+        return false;
+    }
+    const uint32_t data_size = static_cast<uint32_t>(page.data.size());
+
+    std::vector<uint8_t> bytes(PAGE_DATA_HEADER_SIZE + page.data.size());
+    write_u64(bytes.data() + 0, page.page_id);
+    write_u64(bytes.data() + 8, page.region_id);
+    write_u64(bytes.data() + 16, page.region_offset);
+    write_u64(bytes.data() + 24, page.version);
+    bytes[32] = page.state;
+    write_u32(bytes.data() + 33, data_size);
+    if (!page.data.empty()) {
+        std::memcpy(bytes.data() + PAGE_DATA_HEADER_SIZE,
+                    page.data.data(), page.data.size());
+    }
+    out = std::move(bytes);
+    return true;
+}
+
+bool deserialize_page_data(const std::vector<uint8_t>& data,
+                           PageData& out, std::string& error) {
+    if (data.size() < PAGE_DATA_HEADER_SIZE) {
+        error = "PageData incompleto";
+        return false;
+    }
+    PageData page;
+    page.page_id = read_u64(data.data() + 0);
+    page.region_id = read_u64(data.data() + 8);
+    page.region_offset = read_u64(data.data() + 16);
+    page.version = read_u64(data.data() + 24);
+    page.state = data[32];
+    page.data_size = read_u32(data.data() + 33);
+
+    if (!valid_state(page.state)) {
+        error = "estado MSI de PageData invalido";
+        return false;
+    }
+    if (page.data_size > DSM_MAX_PAYLOAD_SIZE - PAGE_DATA_HEADER_SIZE ||
+        data.size() != PAGE_DATA_HEADER_SIZE + page.data_size) {
+        error = "data_size de PageData no coincide con el mensaje";
+        return false;
+    }
+    page.data.assign(data.begin() + PAGE_DATA_HEADER_SIZE, data.end());
+    out = std::move(page);
+    return true;
+}
+
+bool serialize_region_info_request(const RegionInfoRequest& request,
+                                   std::vector<uint8_t>& out, std::string& error) {
+    if (request.region_id == 0) {
+        error = "REGION_INFO_REQUEST requiere region_id";
+        return false;
+    }
+    std::vector<uint8_t> bytes(REGION_INFO_REQUEST_SIZE);
+    write_u64(bytes.data(), request.region_id);
+    out = std::move(bytes);
+    return true;
+}
+
+bool deserialize_region_info_request(const std::vector<uint8_t>& data,
+                                     RegionInfoRequest& out, std::string& error) {
+    if (data.size() != REGION_INFO_REQUEST_SIZE) {
+        error = "REGION_INFO_REQUEST con tamano invalido";
+        return false;
+    }
+    RegionInfoRequest request;
+    request.region_id = read_u64(data.data());
+    if (request.region_id == 0) {
+        error = "REGION_INFO_REQUEST requiere region_id";
+        return false;
+    }
+    out = request;
+    return true;
+}
+
+bool serialize_region_info_response(const RegionInfoResponse& response,
+                                    std::vector<uint8_t>& out, std::string& error) {
+    if (response.region_id == 0 || response.owner_id == 0 ||
+        response.size == 0 || response.page_size == 0 ||
+        response.size % response.page_size != 0 ||
+        (response.page_size & (response.page_size - 1)) != 0) {
+        error = "REGION_INFO_RESPONSE invalida";
+        return false;
+    }
+    std::vector<uint8_t> bytes(REGION_INFO_RESPONSE_SIZE);
+    write_u64(bytes.data() + 0, response.region_id);
+    write_u64(bytes.data() + 8, response.owner_id);
+    write_u64(bytes.data() + 16, response.size);
+    write_u32(bytes.data() + 24, response.page_size);
+    out = std::move(bytes);
+    return true;
+}
+
+bool deserialize_region_info_response(const std::vector<uint8_t>& data,
+                                      RegionInfoResponse& out, std::string& error) {
+    if (data.size() != REGION_INFO_RESPONSE_SIZE) {
+        error = "REGION_INFO_RESPONSE con tamano invalido";
+        return false;
+    }
+    RegionInfoResponse response;
+    response.region_id = read_u64(data.data() + 0);
+    response.owner_id = read_u64(data.data() + 8);
+    response.size = read_u64(data.data() + 16);
+    response.page_size = read_u32(data.data() + 24);
+    if (response.region_id == 0 || response.owner_id == 0 ||
+        response.size == 0 || response.page_size == 0 ||
+        response.size % response.page_size != 0 ||
+        (response.page_size & (response.page_size - 1)) != 0) {
+        error = "REGION_INFO_RESPONSE invalida";
+        return false;
+    }
+    out = response;
     return true;
 }

@@ -81,6 +81,24 @@ target_link_libraries(test_pager PRIVATE Threads::Threads)
 add_test(NAME pager COMMAND test_pager)
 set_tests_properties(pager PROPERTIES TIMEOUT 20)
 
+add_executable(test_page_transfer
+    tests/test_page_transfer.cpp
+    src/network.cpp
+    src/protocol.cpp
+    src/node.cpp
+    src/pager.cpp
+    src/memory_manager.cpp
+    src/fault_queue.cpp
+    src/signal_handler.cpp
+    src/dsm_node.cpp
+)
+target_include_directories(test_page_transfer PRIVATE include)
+target_compile_options(test_page_transfer PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_page_transfer PRIVATE Threads::Threads)
+
+add_test(NAME page_transfer COMMAND test_page_transfer)
+set_tests_properties(page_transfer PROPERTIES TIMEOUT 20)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME console COMMAND "${Python3_EXECUTABLE}"

@@ -6,14 +6,21 @@
 
 #include <pthread.h>
 
+#include <functional>
 #include <queue>
 #include <atomic>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class NetworkManager {
 public:
+    using PageRequestHandler = std::function<bool(
+        const PageRequest&, NodeId, PageData&, std::string&)>;
+    using RegionInfoHandler = std::function<bool(
+        RegionId, RegionDescriptor&, std::string&)>;
+
     explicit NetworkManager(const Config& config, NodeId node_id = 0);
     ~NetworkManager();
 
@@ -23,6 +30,20 @@ public:
     bool start(std::string& error);
     bool join(const std::string& bootstrap, std::string& error);
     void stop();
+
+    // Deben configurarse antes de start(): los workers los consultan.
+    void set_page_request_handler(PageRequestHandler handler) {
+        page_request_handler_ = std::move(handler);
+    }
+    void set_region_info_handler(RegionInfoHandler handler) {
+        region_info_handler_ = std::move(handler);
+    }
+
+    bool find_node(NodeId id, NodeInfo& out) const;
+    bool fetch_page(const NodeInfo& owner, const PageRequest& request,
+                    PageData& response, std::string& error);
+    bool query_region(const NodeInfo& owner, RegionId region_id,
+                      RegionDescriptor& out, std::string& error);
 
     uint16_t port() const { return port_; }
     NodeId node_id() const { return node_id_; }
@@ -50,6 +71,8 @@ private:
     NodeId node_id_hint_ = 0;
     NodeId node_id_ = 0;
     NodeTable node_table_;
+    PageRequestHandler page_request_handler_;
+    RegionInfoHandler region_info_handler_;
     std::atomic<uint64_t> next_message_{1};
     bool running_ = false;
     bool listener_started_ = false;
