@@ -500,3 +500,44 @@ bool deserialize_region_info_response(const std::vector<uint8_t>& data,
     out = response;
     return true;
 }
+
+bool serialize_invalidate(const InvalidateMessage& message,
+                          std::vector<uint8_t>& out, std::string& error) {
+    if (message.region_id == 0 || message.new_owner == 0 ||
+        (message.target_state != static_cast<uint8_t>(MSIState::INVALID) &&
+         message.target_state != static_cast<uint8_t>(MSIState::SHARED))) {
+        error = "INVALIDATE con region, destinatario o estado invalido";
+        return false;
+    }
+    out.resize(41);
+    write_u64(out.data(), message.page_id);
+    write_u64(out.data() + 8, message.region_id);
+    write_u64(out.data() + 16, message.region_offset);
+    write_u64(out.data() + 24, message.new_version);
+    write_u64(out.data() + 32, message.new_owner);
+    out[40] = message.target_state;
+    return true;
+}
+
+bool deserialize_invalidate(const std::vector<uint8_t>& data,
+                            InvalidateMessage& out, std::string& error) {
+    if (data.size() != 41) {
+        error = "INVALIDATE con tamano invalido";
+        return false;
+    }
+    InvalidateMessage message;
+    message.page_id = read_u64(data.data());
+    message.region_id = read_u64(data.data() + 8);
+    message.region_offset = read_u64(data.data() + 16);
+    message.new_version = read_u64(data.data() + 24);
+    message.new_owner = read_u64(data.data() + 32);
+    message.target_state = data[40];
+    if (message.region_id == 0 || message.new_owner == 0 ||
+        (message.target_state != static_cast<uint8_t>(MSIState::INVALID) &&
+         message.target_state != static_cast<uint8_t>(MSIState::SHARED))) {
+        error = "INVALIDATE con region, destinatario o estado invalido";
+        return false;
+    }
+    out = message;
+    return true;
+}

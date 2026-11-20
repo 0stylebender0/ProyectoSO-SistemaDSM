@@ -5,6 +5,7 @@
 #include "protocol.hpp"
 
 #include <functional>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -21,24 +22,29 @@ struct RemotePageQuery {
 
 using PageFetcher =
     std::function<bool(const RemotePageQuery&, PageData&, std::string&)>;
+using PageInvalidator = std::function<bool(
+    NodeId, const InvalidateMessage&, PageData&, std::string&)>;
 
 class Pager {
 public:
-    Pager(MemoryManager& memory, NodeId local_id);
+    Pager(MemoryManager& memory, NodeId local_id, uint32_t timeout_ms = 5000);
 
     Pager(const Pager&) = delete;
     Pager& operator=(const Pager&) = delete;
 
     // Se configura antes de que el FaultWorker pueda atender un fallo remoto.
     void set_page_fetcher(PageFetcher fetcher);
+    void set_page_invalidator(PageInvalidator invalidator);
 
     bool create_region(uint64_t size, RegionId& region_id, std::string& error);
     bool attach_region(const RegionDescriptor& descriptor, std::string& error);
     bool resolve_fault(PageId page_id, bool write, std::string& error);
 
-    // Atiende un PAGE_REQUEST(READ) del nodo dueno de la region.
     bool serve_page_request(const PageRequest& request, NodeId requester,
                             PageData& response, std::string& error);
+    bool invalidate_page(const InvalidateMessage& message, NodeId sender,
+                         PageData& writeback, std::string& error);
+    bool control_info(PageId page_id, GlobalPageControl& out) const;
 
     bool page_info(PageId page_id, PageInfo& out) const;
     std::vector<PageInfo> page_snapshot() const;
@@ -54,16 +60,31 @@ public:
 private:
     bool attach_locked(const RegionDescriptor& descriptor, uint64_t first_page,
                        std::string& error);
-    bool resolve_owner_locked(PageInfo& page, bool write, std::string& error);
+    bool serve_locked(const PageRequest& request, NodeId requester, PageId page_id,
+                      PageData& response, std::unique_lock<std::mutex>& lock,
+                      std::string& error);
+
+    struct PageSync {
+        bool fetching = false;
+        uint64_t epoch = 0;
+        uint64_t invalidation_version = 0;
+        NodeId grant_recipient = 0;
+        PageData writeback;
+    };
 
     MemoryManager& memory_;
     NodeId local_id_;
     PageFetcher fetcher_;
+    PageInvalidator invalidator_;
+    uint32_t timeout_ms_;
 
-    // El hito 2.3 solo tiene un FaultWorker y no hace red bajo el lock.
-    // En 2.6 este mutex se sustituye por bloqueos por pagina.
+    // Protege las tablas; las esperas de red se realizan sin este mutex.
     mutable std::mutex mutex_;
+    std::condition_variable ready_;
     LocalPageTable pages_;
+    std::unordered_map<PageId, PageSync> sync_;
+    std::unordered_map<PageId, GlobalPageControl> controls_;
+    std::unordered_map<PageId, std::vector<uint8_t>> backing_;
     RegionTable regions_;
     uint64_t next_free_page_ = 0;
 };

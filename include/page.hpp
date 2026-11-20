@@ -54,7 +54,6 @@ struct GlobalPageControl {
 
 using LocalPageTable = std::unordered_map<PageId, PageInfo>;
 
-// Descriptor que viajara en REGION_INFO_RESPONSE durante el hito 2.4.
 struct RegionDescriptor {
     RegionId region_id = 0;
     NodeId owner_id = 0;

@@ -3,7 +3,22 @@
 #include <utility>
 
 DSMNode::DSMNode(MemoryManager& memory, NetworkManager& network, NodeId local_id)
-    : memory_(memory), network_(network), pager_(memory, local_id) {
+    : memory_(memory), network_(network), pager_(memory, local_id, network.request_timeout_ms()) {
+    pager_.set_page_invalidator(
+        [this](NodeId target_id, const InvalidateMessage& request,
+               PageData& writeback, std::string& error) {
+            NodeInfo target;
+            if (!network_.find_node(target_id, target)) {
+                error = "nodo a invalidar desconocido: " + std::to_string(target_id);
+                return false;
+            }
+            return network_.invalidate(target, request, writeback, error);
+        });
+    network_.set_invalidation_handler(
+        [this](const InvalidateMessage& request, NodeId sender,
+               PageData& writeback, std::string& error) {
+            return pager_.invalidate_page(request, sender, writeback, error);
+        });
     pager_.set_page_fetcher(
         [this](const RemotePageQuery& query, PageData& response, std::string& error) {
             NodeInfo owner;

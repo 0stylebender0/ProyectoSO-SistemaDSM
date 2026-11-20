@@ -9,7 +9,7 @@
 #include <vector>
 
 constexpr uint32_t DSM_MAGIC = 0x44534D31u;  // "DSM1" en ASCII
-constexpr uint16_t DSM_PROTOCOL_VERSION = 2;
+constexpr uint16_t DSM_PROTOCOL_VERSION = 3;
 constexpr std::size_t DSM_HEADER_SIZE = 44;
 constexpr uint32_t DSM_MAX_PAYLOAD_SIZE = 1024u * 1024u;  // 1 MiB
 
@@ -61,9 +61,8 @@ enum class ErrorCode : uint16_t {
     PROTOCOL_MISMATCH  = 10,
 };
 
-// PageId es local a cada nodo. En la red la identidad canonica de una pagina
-// es (region_id, region_offset); page_id solo sirve para correlacionar la
-// respuesta con la pagina local del solicitante.
+// En la red la pagina se identifica por (region_id, region_offset).
+// page_id correlaciona la respuesta con la pagina local del solicitante.
 struct PageRequest {
     PageId page_id = 0;
     RegionId region_id = 0;
@@ -85,6 +84,16 @@ struct PageData {
 
 struct RegionInfoRequest {
     RegionId region_id = 0;
+};
+
+struct InvalidateMessage {
+    PageId page_id = 0;
+    RegionId region_id = 0;
+    uint64_t region_offset = 0;
+    uint64_t new_version = 0;
+    // Cambia el holder, no el dueno permanente de la region.
+    NodeId new_owner = 0;
+    uint8_t target_state = static_cast<uint8_t>(MSIState::INVALID);
 };
 
 struct RegionInfoResponse {
@@ -144,3 +153,8 @@ bool serialize_region_info_response(const RegionInfoResponse& response,
                                     std::vector<uint8_t>& out, std::string& error);
 bool deserialize_region_info_response(const std::vector<uint8_t>& data,
                                       RegionInfoResponse& out, std::string& error);
+
+bool serialize_invalidate(const InvalidateMessage& message,
+                          std::vector<uint8_t>& out, std::string& error);
+bool deserialize_invalidate(const std::vector<uint8_t>& data,
+                            InvalidateMessage& out, std::string& error);

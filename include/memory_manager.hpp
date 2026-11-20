@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class MemoryManager {
 public:
@@ -18,6 +19,8 @@ public:
     // Devuelve UINT64_MAX si la direccion no pertenece a esta reserva.
     PageId page_id_from_address(const void* address) const;
     bool protect_page(PageId page_id, int prot, std::string& error);
+    bool install_page(PageId page_id, const std::vector<uint8_t>& data,
+                      int prot, std::string& error);
 
     void*    base()       const { return base_; }
     uint64_t size()       const { return size_; }

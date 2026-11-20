@@ -101,3 +101,27 @@ bool MemoryManager::protect_page(PageId page_id, int prot, std::string& error) {
     }
     return true;
 }
+
+bool MemoryManager::install_page(PageId page_id, const std::vector<uint8_t>& data,
+                                 int prot, std::string& error) {
+    void* target = page_address(page_id);
+    if (target == nullptr || data.size() != page_size_) {
+        error = "contenido o destino de pagina invalido";
+        return false;
+    }
+    void* staging = mmap(nullptr, page_size_, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (staging == MAP_FAILED) {
+        error = std::string("mmap de pagina fallo: ") + std::strerror(errno);
+        return false;
+    }
+    std::memcpy(staging, data.data(), data.size());
+    // La aplicacion solo ve la pagina cuando su contenido y permisos estan listos.
+    if (mprotect(staging, page_size_, prot) == -1 ||
+        mremap(staging, page_size_, page_size_, MREMAP_MAYMOVE | MREMAP_FIXED, target) == MAP_FAILED) {
+        error = std::string("instalacion de pagina fallo: ") + std::strerror(errno);
+        munmap(staging, page_size_);
+        return false;
+    }
+    return true;
+}

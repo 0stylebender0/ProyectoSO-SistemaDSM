@@ -320,6 +320,31 @@ void NetworkManager::handle_connection(int fd) {
             }
             continue;
         }
+        if (request.type == static_cast<uint16_t>(MessageType::INVALIDATE)) {
+            InvalidateMessage message;
+            if (request.sender_id == 0 || !deserialize_invalidate(payload, message, error)) {
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                continue;
+            }
+            PageData writeback;
+            if (!invalidation_handler_ ||
+                !invalidation_handler_(message, request.sender_id, writeback, error)) {
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return;
+                continue;
+            }
+            std::vector<uint8_t> reply;
+            if (!writeback.data.empty()) {
+                if (!serialize_page_data(writeback, reply, error)) return;
+                const MessageHeader data = make_header(MessageType::PAGE_DATA,
+                    request.message_id, node_id_, request.sender_id);
+                if (!send_message(fd, data, reply, error)) return;
+            }
+            if (!serialize_invalidate(message, reply, error)) return;
+            const MessageHeader ack = make_header(MessageType::INVALIDATE_ACK,
+                request.message_id, node_id_, request.sender_id);
+            if (!send_message(fd, ack, reply, error)) return;
+            continue;
+        }
         if (request.type == static_cast<uint16_t>(MessageType::PAGE_REQUEST)) {
             PageRequest page_request;
             if (request.sender_id == 0 ||
@@ -449,6 +474,45 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
         } else {
             ok = deserialize_page_data(reply, response, error);
         }
+    }
+    close_outgoing(fd);
+    return ok;
+}
+
+bool NetworkManager::invalidate(const NodeInfo& target, const InvalidateMessage& request,
+                                 PageData& writeback, std::string& error) {
+    writeback = PageData{};
+    if (target.id == 0 || target.id == node_id_) {
+        error = "destino de INVALIDATE invalido";
+        return false;
+    }
+    std::vector<uint8_t> payload;
+    if (!serialize_invalidate(request, payload, error)) return false;
+    const int fd = connect_to(target.ip_address, target.tcp_port, error);
+    if (fd == -1) return false;
+    const MessageHeader outgoing = make_header(MessageType::INVALIDATE,
+        next_message_++, node_id_, target.id);
+    MessageHeader incoming{};
+    std::vector<uint8_t> reply;
+    auto receive = [&] {
+        if (!recv_message(fd, incoming, reply, error)) return false;
+        if (incoming.message_id != outgoing.message_id || incoming.sender_id != target.id ||
+            incoming.receiver_id != node_id_) {
+            error = "respuesta a INVALIDATE sin correlacion";
+            return false;
+        }
+        return true;
+    };
+    bool ok = send_message(fd, outgoing, payload, error) && receive();
+    if (ok && incoming.type == static_cast<uint16_t>(MessageType::PAGE_DATA)) {
+        ok = deserialize_page_data(reply, writeback, error) &&
+             writeback.page_id == request.page_id && writeback.region_id == request.region_id &&
+             writeback.region_offset == request.region_offset && receive();
+    }
+    if (ok && (incoming.type != static_cast<uint16_t>(MessageType::INVALIDATE_ACK) ||
+               reply != payload)) {
+        error = "INVALIDATE_ACK invalido o rechazado";
+        ok = false;
     }
     close_outgoing(fd);
     return ok;

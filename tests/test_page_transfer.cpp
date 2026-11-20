@@ -241,11 +241,11 @@ namespace {
         require(!b_network.query_region(a_info, 0xDEADBEEFULL, missing, error),
                 "rechazar una region inexistente");
 
-        // La escritura remota corresponde al hito 2.5.
-        require(!b_node.resolve_fault(b_page0, true, error),
-                "rechazar escritura remota en 2.4");
-        require(permissions_at(b_memory.page_address(b_page0)) == "r--p",
-                "la escritura remota rechazada no cambia permisos");
+        require(b_node.resolve_fault(b_page0, true, error), "conceder escritura remota: " + error);
+        require(permissions_at(b_memory.page_address(b_page0)) == "rw-p",
+                "la escritura remota habilita READ|WRITE");
+        require(permissions_at(a_memory.page_address(a_page0)) == "---p",
+                "el dueno queda invalidado al conceder M remoto");
 
         faults.stop();
         b_network.stop();

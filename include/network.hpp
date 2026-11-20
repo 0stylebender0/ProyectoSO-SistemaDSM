@@ -20,6 +20,8 @@ public:
         const PageRequest&, NodeId, PageData&, std::string&)>;
     using RegionInfoHandler = std::function<bool(
         RegionId, RegionDescriptor&, std::string&)>;
+    using InvalidationHandler = std::function<bool(
+        const InvalidateMessage&, NodeId, PageData&, std::string&)>;
 
     explicit NetworkManager(const Config& config, NodeId node_id = 0);
     ~NetworkManager();
@@ -38,6 +40,12 @@ public:
     void set_region_info_handler(RegionInfoHandler handler) {
         region_info_handler_ = std::move(handler);
     }
+    void set_invalidation_handler(InvalidationHandler handler) {
+        invalidation_handler_ = std::move(handler);
+    }
+    bool invalidate(const NodeInfo& target, const InvalidateMessage& request,
+                    PageData& writeback, std::string& error);
+    uint32_t request_timeout_ms() const { return config_.request_timeout_ms; }
 
     bool find_node(NodeId id, NodeInfo& out) const;
     bool fetch_page(const NodeInfo& owner, const PageRequest& request,
@@ -73,6 +81,7 @@ private:
     NodeTable node_table_;
     PageRequestHandler page_request_handler_;
     RegionInfoHandler region_info_handler_;
+    InvalidationHandler invalidation_handler_;
     std::atomic<uint64_t> next_message_{1};
     bool running_ = false;
     bool listener_started_ = false;
