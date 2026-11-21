@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.hpp"
+#include "connection_history.hpp"
 #include "node.hpp"
 #include "protocol.hpp"
 
@@ -56,20 +57,24 @@ public:
     uint16_t port() const { return port_; }
     NodeId node_id() const { return node_id_; }
     std::vector<NodeInfo> nodes() const { return node_table_.snapshot(); }
+    std::vector<HistoryEntry> history() const { return history_.snapshot(); }
 
 private:
     static void* listener_entry(void* context);
     static void* worker_entry(void* context);
+    static void* page_worker_entry(void* context);
 
     void listen_loop();
     void worker_loop();
-    void handle_connection(int fd);
+    bool handle_connection(int fd);
+    void page_worker_loop();
     bool handle_join(int fd, const MessageHeader& request,
                      const std::vector<uint8_t>& payload, std::string& error);
     bool send_error(int fd, const MessageHeader& request, ErrorCode code, std::string& error);
     void announce(const NodeInfo& node, const std::vector<NodeInfo>& targets, NodeId except = 0);
     void leave();
-    int connect_to(const std::string& host, uint16_t port, std::string& error);
+    int connect_to(const std::string& host, uint16_t port, std::string& error,
+                   IODeadline deadline = IODeadline::max());
     void close_outgoing(int fd);
     NodeInfo local_node() const;
 
@@ -79,6 +84,7 @@ private:
     NodeId node_id_hint_ = 0;
     NodeId node_id_ = 0;
     NodeTable node_table_;
+    ConnectionHistory history_;
     PageRequestHandler page_request_handler_;
     RegionInfoHandler region_info_handler_;
     InvalidationHandler invalidation_handler_;
@@ -87,6 +93,14 @@ private:
     bool listener_started_ = false;
     pthread_t listener_{};
     std::vector<pthread_t> workers_;
+    std::vector<pthread_t> page_workers_;
+    struct PageJob {
+        int fd;
+        MessageHeader header;
+        PageRequest request;
+    };
+    std::queue<PageJob> page_jobs_;
+    pthread_cond_t page_ready_ = PTHREAD_COND_INITIALIZER;
     std::queue<int> pending_;
     std::set<int> connections_;
     std::set<int> outgoing_;

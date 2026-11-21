@@ -1445,3 +1445,42 @@ Se espera contar con:
 - Aplicaciones de validación.
 - Pruebas con múltiples computadoras físicas.
 - Documentación técnica completa.
+
+## Sincronización implementada en el hito 2.6
+
+El mutex de tablas del Pager protege el registro de regiones y las referencias
+a páginas. Se libera antes de tomar el mutex de una página. Cada página protege
+su estado MSI, directorio, respaldo y fallo pendiente con su propio mutex.
+Los snapshots de páginas toman un solo mutex de página a la vez.
+
+Los hilos que coinciden en un fallo esperan su misma condición y reciben el
+mismo resultado, incluido un error. El primer hilo realiza la solicitud remota;
+los demás reutilizan la página instalada. Una promoción de lectura a escritura
+puede necesitar una segunda solicitud.
+
+Antes de llamar al fetcher o invalidator se libera el mutex de página.
+`write_in_progress` reserva la operación del directorio mientras espera la red.
+Las invalidaciones entrantes pueden retirar una copia aunque tenga una descarga
+pendiente; esperar esa descarga antes de confirmar produciría un ciclo.
+
+NodeTable, ConnectionHistory y Statistics tienen mutexes independientes.
+Sus métodos no llaman a otros componentes mientras mantienen el bloqueo.
+Statistics puede actualizarse bajo el mutex de página, pero sus snapshots no
+toman mutexes del Pager. El mutex de red solo protege colas, descriptores y
+estado de ejecución; se libera antes de procesar un mensaje o esperar la red.
+
+FaultWorker utiliza cuatro hilos por defecto. La lectura de cada evento del pipe
+se protege entre workers; el handler de SIGSEGV sigue escribiendo sin mutex.
+La red utiliza `worker_count` hilos para control y otros `worker_count` para
+PAGE_REQUEST, que usa una conexión por solicitud. Así las transferencias no
+ocupan los hilos que reciben INVALIDATE o JOIN.
+
+PAGE_REQUEST e INVALIDATE comparten un plazo de `request_timeout_ms` entre
+conexión, envío y recepción. PAGE_DATA y su INVALIDATE_ACK comparten el mismo
+plazo; recibir fragmentos no lo reinicia. Las esperas de fallos y directorio
+también tienen límite. Los callbacks se configuran antes de iniciar los hilos;
+los hilos de aplicación deben terminar antes de detener FaultWorker o liberar
+la memoria.
+
+La coherencia de páginas no hace atómicas operaciones como `x = x + 1`.
+La aplicación debe proteger esas operaciones compuestas entre sus propios hilos.

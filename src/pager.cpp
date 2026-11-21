@@ -167,7 +167,10 @@ bool Pager::attach_locked(const RegionDescriptor& descriptor, uint64_t first_pag
         page.version = 0;
         page.locally_present = false;
 
-        if (!pages_.emplace(page.page_id, page).second) {
+        auto entry = std::make_shared<PageEntry>();
+        entry->page = page;
+        entry->region = region;
+        if (!pages_.emplace(page.page_id, entry).second) {
             regions_.erase(descriptor.region_id);
             for (uint64_t j = 0; j < i; ++j) pages_.erase(first_page + j);
             error = "colision de PageId al registrar la region";
@@ -178,38 +181,71 @@ bool Pager::attach_locked(const RegionDescriptor& descriptor, uint64_t first_pag
             control.page_id = page.page_id;
             control.region_id = descriptor.region_id;
             control.owner_id = local_id_;
-            controls_.emplace(page.page_id, control);
+            entry->control = control;
         }
     }
 
     return true;
 }
 
+std::shared_ptr<Pager::PageEntry> Pager::find_page(PageId page_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pages_.find(page_id);
+    return found == pages_.end() ? nullptr : found->second;
+}
+
+std::shared_ptr<Pager::PageEntry> Pager::find_region_page(RegionId id, uint64_t offset) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto region = regions_.find(id);
+    if (region == regions_.end() || offset >= region->second.page_count) return nullptr;
+    return pages_.at(region->second.first_page + offset);
+}
+
 bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms_);
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (pages_.find(page_id) == pages_.end()) {
+    statistics_.fault();
+    auto entry = find_page(page_id);
+    if (!entry) {
         error = "pagina desconocida: " + std::to_string(page_id);
         return false;
     }
-    if (!ready_.wait_until(lock, deadline, [&] { return !sync_[page_id].fetching; })) {
-        error = "timeout esperando un fallo pendiente";
-        return false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms_);
+    std::unique_lock<std::mutex> lock(entry->mutex);
+    while (entry->pending) {
+        statistics_.coalesced();
+        auto pending = entry->pending;
+        if (!pending->ready.wait_until(lock, deadline, [&] { return pending->done; })) {
+            error = "timeout esperando un fallo pendiente";
+            return false;
+        }
+        if (!pending->success) {
+            error = pending->error;
+            return false;
+        }
     }
+    auto pending = std::make_shared<PendingFault>();
+    entry->pending = pending;
+    auto finish = [&](bool success) {
+        pending->success = success;
+        pending->error = success ? "" : error;
+        pending->done = true;
+        entry->pending.reset();
+        pending->ready.notify_all();
+        return success;
+    };
     while (true) {
-        PageInfo& page = pages_.at(page_id);
+        PageInfo& page = entry->page;
         if (page.owner_id == local_id_) {
-            if (!ready_.wait_until(lock, deadline, [&] {
-                    return !controls_[page_id].write_in_progress;
+            if (!entry->ready.wait_until(lock, deadline, [&] {
+                    return !entry->control.write_in_progress;
                 })) {
                 error = "timeout esperando el directorio local";
-                return false;
+                return finish(false);
             }
         }
         if (page.state == MSIState::MODIFIED || (!write && page.state == MSIState::SHARED)) {
-            return true;
+            return finish(true);
         }
-        const RegionInfo& region = regions_.at(page.region_id);
+        const RegionInfo& region = entry->region;
         PageRequest request;
         request.page_id = page_id;
         request.region_id = page.region_id;
@@ -219,11 +255,11 @@ bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
         request.known_version = page.version;
         if (page.owner_id == local_id_) {
             PageData response;
-            return serve_locked(request, local_id_, page_id, response, lock, error);
+            return finish(serve_locked(request, local_id_, *entry, response, lock, error));
         }
         if (!fetcher_) {
             error = "no hay fetcher configurado para paginas remotas";
-            return false;
+            return finish(false);
         }
         RemotePageQuery query;
         query.page_id = page_id;
@@ -233,24 +269,22 @@ bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
         query.current_state = page.state;
         query.known_version = page.version;
         query.write = write;
-        const uint64_t epoch = sync_[page_id].epoch;
-        sync_[page_id].fetching = true;
+        const uint64_t epoch = entry->sync.epoch;
         lock.unlock();
+        statistics_.request();
         PageData response;
         const bool fetched = fetcher_(query, response, error);
         lock.lock();
-        sync_[page_id].fetching = false;
-        ready_.notify_all();
-        if (!fetched) return false;
+        if (!fetched) return finish(false);
         // Invalidar nuestra copia S forma parte de concedernos M.
         // Las invalidaciones de otras operaciones descartan la descarga pendiente.
-        const auto& sync = sync_.at(page_id);
+        const auto& sync = entry->sync;
         const bool own_grant = sync.grant_recipient == local_id_ &&
                                sync.invalidation_version == response.version;
         if (epoch != sync.epoch && !own_grant) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 error = "timeout reintentando una pagina invalidada durante la descarga";
-                return false;
+                return finish(false);
             }
             continue;
         }
@@ -258,47 +292,45 @@ bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
         if (response.page_id != page_id || response.region_id != query.region_id ||
             response.region_offset != query.region_offset ||
             response.state != static_cast<uint8_t>(expected) ||
-            response.version < pages_.at(page_id).version ||
-            response.data.size() != memory_.page_size() ||
+            response.version < page.version || response.data.size() != memory_.page_size() ||
             response.data_size != response.data.size()) {
             error = "PAGE_DATA no corresponde a la pagina solicitada";
-            return false;
+            return finish(false);
         }
         const int prot = PROT_READ | (write ? PROT_WRITE : 0);
-        if (!memory_.install_page(page_id, response.data, prot, error)) return false;
-        PageInfo& installed = pages_.at(page_id);
-        installed.state = expected;
-        installed.version = response.version;
-        installed.locally_present = true;
-        sync_[page_id].writeback = PageData{};
-        return true;
+        if (!memory_.install_page(page_id, response.data, prot, error)) return finish(false);
+        page.state = expected;
+        page.version = response.version;
+        page.locally_present = true;
+        entry->sync.writeback = PageData{};
+        statistics_.transfer();
+        return finish(true);
     }
 }
 
 bool Pager::serve_page_request(const PageRequest& request, NodeId requester,
                                PageData& response, std::string& error) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    const auto region = regions_.find(request.region_id);
-    if (requester == 0 || request.access_type > 1 || region == regions_.end() ||
-        region->second.descriptor.owner_id != local_id_ ||
-        request.region_offset >= region->second.page_count) {
+    auto entry = find_region_page(request.region_id, request.region_offset);
+    if (requester == 0 || request.access_type > 1 || !entry ||
+        entry->region.descriptor.owner_id != local_id_) {
         error = "PAGE_REQUEST con region, pagina o solicitante invalido";
         return false;
     }
-    const PageId page_id = region->second.first_page + request.region_offset;
-    if (!ready_.wait_for(lock, std::chrono::milliseconds(timeout_ms_), [&] {
-            return !controls_[page_id].write_in_progress;
+    std::unique_lock<std::mutex> lock(entry->mutex);
+    if (!entry->ready.wait_for(lock, std::chrono::milliseconds(timeout_ms_), [&] {
+            return !entry->control.write_in_progress;
         })) {
         error = "timeout esperando una transferencia de pagina";
         return false;
     }
-    return serve_locked(request, requester, page_id, response, lock, error);
+    return serve_locked(request, requester, *entry, response, lock, error);
 }
 
-bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageId page_id,
+bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageEntry& entry,
                          PageData& response, std::unique_lock<std::mutex>& lock,
                          std::string& error) {
-    auto& control = controls_[page_id];
+    const PageId page_id = entry.page.page_id;
+    auto& control = entry.control;
     control.page_id = page_id;
     control.region_id = request.region_id;
     control.owner_id = local_id_;
@@ -309,12 +341,12 @@ bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageId pa
     }
     control.write_in_progress = true;
     auto finish = [&](bool ok) {
-        controls_.at(page_id).write_in_progress = false;
-        ready_.notify_all();
+        entry.control.write_in_progress = false;
+        entry.ready.notify_all();
         return ok;
     };
-    auto& page = pages_.at(page_id);
-    auto& data = backing_[page_id];
+    auto& page = entry.page;
+    auto& data = entry.backing;
     if (data.empty()) data.resize(memory_.page_size(), 0);
     if (page.state == MSIState::MODIFIED) {
         if (!memory_.protect_page(page_id, PROT_READ, error)) return finish(false);
@@ -348,11 +380,12 @@ bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageId pa
             return finish(false);
         }
         lock.unlock();
+        statistics_.invalidation_sent();
         PageData writeback;
         const bool invalidated = invalidator_(target, message, writeback, error);
         lock.lock();
         if (!invalidated) return finish(false);
-        auto& current = controls_.at(page_id);
+        auto& current = entry.control;
         if (target == holder) {
             if (!writeback.data.empty()) {
                 if (writeback.data.size() != memory_.page_size() || writeback.version != version ||
@@ -361,22 +394,22 @@ bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageId pa
                     error = "write-back incompatible con la version del directorio";
                     return finish(false);
                 }
-                backing_.at(page_id) = std::move(writeback.data);
+                entry.backing = std::move(writeback.data);
             }
             // Un holder todavia descargando no tiene cambios; su respuesta se descartara.
             current.current_holder = 0;
             if (!write) current.sharers.insert(target);
         }
         if (write) current.sharers.erase(target);
-        pages_.at(page_id).sharers = current.sharers;
+        entry.page.sharers = current.sharers;
         if (std::chrono::steady_clock::now() > deadline) {
             error = "timeout esperando confirmaciones de invalidacion";
             return finish(false);
         }
     }
-    auto& current = controls_.at(page_id);
-    auto& local = pages_.at(page_id);
-    const auto& content = backing_.at(page_id);
+    auto& current = entry.control;
+    auto& local = entry.page;
+    const auto& content = entry.backing;
     const uint64_t next_version = version + (write ? 1 : 0);
     response.page_id = request.page_id;
     response.region_id = request.region_id;
@@ -403,23 +436,22 @@ bool Pager::serve_locked(const PageRequest& request, NodeId requester, PageId pa
 
 bool Pager::invalidate_page(const InvalidateMessage& message, NodeId sender,
                             PageData& writeback, std::string& error) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto region = regions_.find(message.region_id);
-    if (region == regions_.end() || sender == local_id_ ||
-        region->second.descriptor.owner_id != sender ||
-        message.region_offset >= region->second.page_count ||
+    auto entry = find_region_page(message.region_id, message.region_offset);
+    if (!entry || sender == local_id_ || entry->region.descriptor.owner_id != sender ||
         (message.target_state != static_cast<uint8_t>(MSIState::INVALID) &&
          message.target_state != static_cast<uint8_t>(MSIState::SHARED))) {
         error = "INVALIDATE no corresponde al dueno o a la region";
         return false;
     }
-    const PageId page_id = region->second.first_page + message.region_offset;
-    auto& page = pages_.at(page_id);
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    const PageId page_id = entry->page.page_id;
+    auto& page = entry->page;
     if (message.new_version < page.version) {
         error = "INVALIDATE con version antigua";
         return false;
     }
-    auto& sync = sync_[page_id];
+    statistics_.invalidation_received();
+    auto& sync = entry->sync;
     ++sync.epoch;
     sync.invalidation_version = message.new_version;
     sync.grant_recipient = message.new_owner;
@@ -450,26 +482,33 @@ bool Pager::invalidate_page(const InvalidateMessage& message, NodeId sender,
 }
 
 bool Pager::control_info(PageId page_id, GlobalPageControl& out) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = controls_.find(page_id);
-    if (found == controls_.end()) return false;
-    out = found->second;
+    auto entry = find_page(page_id);
+    if (!entry || entry->region.descriptor.owner_id != local_id_) return false;
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    out = entry->control;
     return true;
 }
 
 bool Pager::page_info(PageId page_id, PageInfo& out) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = pages_.find(page_id);
-    if (found == pages_.end()) return false;
-    out = found->second;
+    auto entry = find_page(page_id);
+    if (!entry) return false;
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    out = entry->page;
     return true;
 }
 
 std::vector<PageInfo> Pager::page_snapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::shared_ptr<PageEntry>> entries;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& entry : pages_) entries.push_back(entry.second);
+    }
     std::vector<PageInfo> result;
-    result.reserve(pages_.size());
-    for (const auto& entry : pages_) result.push_back(entry.second);
+    result.reserve(entries.size());
+    for (const auto& entry : entries) {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        result.push_back(entry->page);
+    }
     return result;
 }
 
@@ -490,19 +529,12 @@ std::vector<RegionInfo> Pager::region_snapshot() const {
 }
 
 bool Pager::assignment(PageId page_id, PageAssignment& out) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    const auto page = pages_.find(page_id);
-    if (page == pages_.end()) return false;
-
-    const auto region = regions_.find(page->second.region_id);
-    if (region == regions_.end() || page_id < region->second.first_page) return false;
-
-    PageAssignment result;
-    result.page_id = page_id;
-    result.region_id = page->second.region_id;
-    result.owner_id = page->second.owner_id;
-    result.region_offset = page_id - region->second.first_page;
-    out = result;
+    auto entry = find_page(page_id);
+    if (!entry) return false;
+    std::lock_guard<std::mutex> lock(entry->mutex);
+    out.page_id = page_id;
+    out.region_id = entry->page.region_id;
+    out.owner_id = entry->page.owner_id;
+    out.region_offset = page_id - entry->region.first_page;
     return true;
 }

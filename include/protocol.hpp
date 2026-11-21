@@ -3,6 +3,7 @@
 #include "page.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -103,6 +104,8 @@ struct RegionInfoResponse {
     uint32_t page_size = 0;
 };
 
+using IODeadline = std::chrono::steady_clock::time_point;
+
 std::array<uint8_t, DSM_HEADER_SIZE> serialize_header(const MessageHeader& header);
 
 bool deserialize_header(
@@ -112,21 +115,25 @@ bool deserialize_header(
     std::string& error
 );
 
-bool send_all(int fd, const void* data, std::size_t length, std::string& error);
-bool recv_all(int fd, void* data, std::size_t length, std::string& error);
+bool send_all(int fd, const void* data, std::size_t length, std::string& error,
+              IODeadline deadline = IODeadline::max());
+bool recv_all(int fd, void* data, std::size_t length, std::string& error,
+              IODeadline deadline = IODeadline::max());
 
 bool send_message(
     int fd,
     const MessageHeader& header,
     const std::vector<uint8_t>& payload,
-    std::string& error
+    std::string& error,
+    IODeadline deadline = IODeadline::max()
 );
 
 bool recv_message(
     int fd,
     MessageHeader& header,
     std::vector<uint8_t>& payload,
-    std::string& error
+    std::string& error,
+    IODeadline deadline = IODeadline::max()
 );
 
 bool serialize_nodes(const std::vector<NodeInfo>& nodes,

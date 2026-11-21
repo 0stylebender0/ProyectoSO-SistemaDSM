@@ -1,5 +1,9 @@
 #include "protocol.hpp"
 
+#include <poll.h>
+#include <limits>
+#include <algorithm>
+
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
@@ -113,20 +117,52 @@ bool deserialize_header(
     return true;
 }
 
-bool send_all(int fd, const void* data, std::size_t length, std::string& error) {
+namespace {
+    IODeadline socket_deadline(int fd, int option, IODeadline deadline) {
+        if (deadline != IODeadline::max()) return deadline;
+        timeval timeout{};
+        socklen_t size = sizeof(timeout);
+        if (getsockopt(fd, SOL_SOCKET, option, &timeout, &size) == 0 &&
+            (timeout.tv_sec || timeout.tv_usec)) {
+            return std::chrono::steady_clock::now() + std::chrono::seconds(timeout.tv_sec) +
+                   std::chrono::microseconds(timeout.tv_usec);
+        }
+        return deadline;
+    }
+
+    bool wait_io(int fd, short events, IODeadline deadline, std::string& error) {
+        if (deadline == IODeadline::max()) return true;
+        while (true) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (left <= 0) { error = "timeout de comunicacion"; return false; }
+            pollfd input{fd, events, 0};
+            const int timeout = static_cast<int>(std::min<int64_t>(left, std::numeric_limits<int>::max()));
+            const int result = poll(&input, 1, timeout);
+            if (result < 0 && errno == EINTR) continue;
+            if (result > 0) return true;
+            error = result == 0 ? "timeout de comunicacion" : std::string("poll fallo: ") + std::strerror(errno);
+            return false;
+        }
+    }
+}
+
+bool send_all(int fd, const void* data, std::size_t length, std::string& error, IODeadline deadline) {
     const uint8_t* bytes = static_cast<const uint8_t*>(data);
     std::size_t sent = 0;
 
     while (sent < length) {
+        if (!wait_io(fd, POLLOUT, deadline, error)) return false;
         const ssize_t n = ::send(
             fd,
             bytes + sent,
             length - sent,
-            MSG_NOSIGNAL
+            MSG_NOSIGNAL | (deadline == IODeadline::max() ? 0 : MSG_DONTWAIT)
         );
 
         if (n < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || (deadline != IODeadline::max() &&
+                                   (errno == EAGAIN || errno == EWOULDBLOCK))) {
                 continue;
             }
             error = std::string("send fallo: ") + std::strerror(errno);
@@ -144,15 +180,18 @@ bool send_all(int fd, const void* data, std::size_t length, std::string& error) 
     return true;
 }
 
-bool recv_all(int fd, void* data, std::size_t length, std::string& error) {
+bool recv_all(int fd, void* data, std::size_t length, std::string& error, IODeadline deadline) {
     uint8_t* bytes = static_cast<uint8_t*>(data);
     std::size_t received = 0;
 
     while (received < length) {
-        const ssize_t n = ::recv(fd, bytes + received, length - received, 0);
+        if (!wait_io(fd, POLLIN, deadline, error)) return false;
+        const ssize_t n = ::recv(fd, bytes + received, length - received,
+                                 deadline == IODeadline::max() ? 0 : MSG_DONTWAIT);
 
         if (n < 0) {
-            if (errno == EINTR) {
+            if (errno == EINTR || (deadline != IODeadline::max() &&
+                                   (errno == EAGAIN || errno == EWOULDBLOCK))) {
                 continue;
             }
             error = std::string("recv fallo: ") + std::strerror(errno);
@@ -174,8 +213,10 @@ bool send_message(
     int fd,
     const MessageHeader& header,
     const std::vector<uint8_t>& payload,
-    std::string& error
+    std::string& error,
+    IODeadline deadline
 ) {
+    deadline = socket_deadline(fd, SO_SNDTIMEO, deadline);
     if (payload.size() > DSM_MAX_PAYLOAD_SIZE) {
         error = "payload excede el maximo permitido";
         return false;
@@ -186,12 +227,12 @@ bool send_message(
 
     const auto header_bytes = serialize_header(wire);
 
-    if (!send_all(fd, header_bytes.data(), header_bytes.size(), error)) {
+    if (!send_all(fd, header_bytes.data(), header_bytes.size(), error, deadline)) {
         return false;
     }
 
     if (!payload.empty() &&
-        !send_all(fd, payload.data(), payload.size(), error)) {
+        !send_all(fd, payload.data(), payload.size(), error, deadline)) {
         return false;
     }
 
@@ -202,11 +243,13 @@ bool recv_message(
     int fd,
     MessageHeader& header,
     std::vector<uint8_t>& payload,
-    std::string& error
+    std::string& error,
+    IODeadline deadline
 ) {
+    deadline = socket_deadline(fd, SO_RCVTIMEO, deadline);
     std::array<uint8_t, DSM_HEADER_SIZE> header_bytes{};
 
-    if (!recv_all(fd, header_bytes.data(), header_bytes.size(), error)) {
+    if (!recv_all(fd, header_bytes.data(), header_bytes.size(), error, deadline)) {
         return false;
     }
 
@@ -221,7 +264,7 @@ bool recv_message(
     payload.resize(header.payload_size);
 
     if (header.payload_size > 0 &&
-        !recv_all(fd, payload.data(), payload.size(), error)) {
+        !recv_all(fd, payload.data(), payload.size(), error, deadline)) {
         return false;
     }
 

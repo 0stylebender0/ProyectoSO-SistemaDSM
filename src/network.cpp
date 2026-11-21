@@ -2,6 +2,9 @@
 #include "protocol.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <algorithm>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -74,6 +77,7 @@ NetworkManager::NetworkManager(const Config& config, NodeId node_id)
 NetworkManager::~NetworkManager() {
     stop();
     pthread_cond_destroy(&ready_);
+    pthread_cond_destroy(&page_ready_);
     pthread_mutex_destroy(&mutex_);
 }
 
@@ -138,6 +142,7 @@ bool NetworkManager::start(std::string& error) {
         return false;
     }
 
+    history_.record(self, HistoryEvent::LOCAL_START);
     pthread_mutex_lock(&mutex_);
     running_ = true;
     pthread_mutex_unlock(&mutex_);
@@ -151,6 +156,17 @@ bool NetworkManager::start(std::string& error) {
             return false;
         }
         workers_.push_back(worker);
+    }
+
+    for (uint32_t i = 0; i < config_.worker_count; ++i) {
+        pthread_t worker{};
+        const int result = pthread_create(&worker, nullptr, page_worker_entry, this);
+        if (result != 0) {
+            error = std::string("no se pudo crear worker de paginas: ") + std::strerror(result);
+            stop();
+            return false;
+        }
+        page_workers_.push_back(worker);
     }
 
     const int result = pthread_create(&listener_, nullptr, listener_entry, this);
@@ -179,6 +195,7 @@ void NetworkManager::stop() {
         shutdown(fd, SHUT_RDWR);
     }
     pthread_cond_broadcast(&ready_);
+    pthread_cond_broadcast(&page_ready_);
     pthread_mutex_unlock(&mutex_);
 
     if (listen_fd_ != -1) {
@@ -192,6 +209,12 @@ void NetworkManager::stop() {
         pthread_join(worker, nullptr);
     }
     workers_.clear();
+    for (pthread_t worker : page_workers_) pthread_join(worker, nullptr);
+    page_workers_.clear();
+    while (!page_jobs_.empty()) {
+        close(page_jobs_.front().fd);
+        page_jobs_.pop();
+    }
 
     while (!pending_.empty()) {
         close(pending_.front());
@@ -272,7 +295,7 @@ void NetworkManager::worker_loop() {
         pending_.pop();
         pthread_mutex_unlock(&mutex_);
 
-        handle_connection(fd);
+        if (handle_connection(fd)) continue;
 
         pthread_mutex_lock(&mutex_);
         connections_.erase(fd);
@@ -281,109 +304,105 @@ void NetworkManager::worker_loop() {
     }
 }
 
-void NetworkManager::handle_connection(int fd) {
+bool NetworkManager::handle_connection(int fd) {
     MessageHeader request{};
     std::vector<uint8_t> payload;
     std::string error;
 
     while (recv_message(fd, request, payload, error)) {
         if (request.receiver_id != 0 && request.receiver_id != node_id_) {
-            if (!send_error(fd, request, ErrorCode::UNKNOWN_NODE, error)) return;
+            if (!send_error(fd, request, ErrorCode::UNKNOWN_NODE, error)) return false;
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::JOIN_REQUEST)) {
-            if (!handle_join(fd, request, payload, error)) return;
+            if (!handle_join(fd, request, payload, error)) return false;
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::NODE_LEAVE)) {
             if (!payload.empty() || request.sender_id == 0 || request.sender_id == node_id_) {
-                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
             node_table_.remove(request.sender_id);
             const MessageHeader response = make_header(MessageType::NODE_LEAVE_ACK,
                 request.message_id, node_id_, request.sender_id);
-            if (!send_message(fd, response, {}, error)) return;
+            if (!send_message(fd, response, {}, error)) return false;
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::NODE_ANNOUNCE)) {
             std::vector<NodeInfo> announced;
             bool inserted = false;
             if (!deserialize_nodes(payload, announced, error) || announced.size() != 1) {
-                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
             } else if (announced[0].page_size != config_.page_size) {
-                if (!send_error(fd, request, ErrorCode::PROTOCOL_MISMATCH, error)) return;
+                if (!send_error(fd, request, ErrorCode::PROTOCOL_MISMATCH, error)) return false;
             } else if (!node_table_.add(announced[0], error, &inserted)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return;
-            } else if (inserted) {
-                announce(announced[0], nodes(), request.sender_id);
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
+            } else {
+                history_.record(announced[0], HistoryEvent::ANNOUNCE_RECEIVED);
+                if (inserted) announce(announced[0], nodes(), request.sender_id);
             }
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::INVALIDATE)) {
             InvalidateMessage message;
             if (request.sender_id == 0 || !deserialize_invalidate(payload, message, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
             PageData writeback;
             if (!invalidation_handler_ ||
                 !invalidation_handler_(message, request.sender_id, writeback, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
                 continue;
             }
             std::vector<uint8_t> reply;
             if (!writeback.data.empty()) {
-                if (!serialize_page_data(writeback, reply, error)) return;
+                if (!serialize_page_data(writeback, reply, error)) return false;
                 const MessageHeader data = make_header(MessageType::PAGE_DATA,
                     request.message_id, node_id_, request.sender_id);
-                if (!send_message(fd, data, reply, error)) return;
+                if (!send_message(fd, data, reply, error)) return false;
             }
-            if (!serialize_invalidate(message, reply, error)) return;
+            if (!serialize_invalidate(message, reply, error)) return false;
             const MessageHeader ack = make_header(MessageType::INVALIDATE_ACK,
                 request.message_id, node_id_, request.sender_id);
-            if (!send_message(fd, ack, reply, error)) return;
+            if (!send_message(fd, ack, reply, error)) return false;
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::PAGE_REQUEST)) {
             PageRequest page_request;
             if (request.sender_id == 0 ||
                 !deserialize_page_request(payload, page_request, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
             if (!page_request_handler_) {
-                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return;
+                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return false;
                 continue;
             }
-            PageData page_data;
-            if (!page_request_handler_(page_request, request.sender_id, page_data, error)) {
-                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return;
-                continue;
+            pthread_mutex_lock(&mutex_);
+            if (!running_) {
+                pthread_mutex_unlock(&mutex_);
+                return false;
             }
-            std::vector<uint8_t> reply;
-            if (!serialize_page_data(page_data, reply, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return;
-                continue;
-            }
-            const MessageHeader response = make_header(MessageType::PAGE_DATA,
-                request.message_id, node_id_, request.sender_id);
-            if (!send_message(fd, response, reply, error)) return;
-            continue;
+            page_jobs_.push({fd, request, page_request});
+            pthread_cond_signal(&page_ready_);
+            pthread_mutex_unlock(&mutex_);
+            return true;
         }
         if (request.type == static_cast<uint16_t>(MessageType::REGION_INFO_REQUEST)) {
             RegionInfoRequest info_request;
             if (!deserialize_region_info_request(payload, info_request, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
             if (!region_info_handler_) {
-                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return;
+                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return false;
                 continue;
             }
             RegionDescriptor descriptor;
             if (!region_info_handler_(info_request.region_id, descriptor, error)) {
-                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return;
+                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return false;
                 continue;
             }
             RegionInfoResponse info_response;
@@ -393,12 +412,12 @@ void NetworkManager::handle_connection(int fd) {
             info_response.page_size = descriptor.page_size;
             std::vector<uint8_t> reply;
             if (!serialize_region_info_response(info_response, reply, error)) {
-                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return;
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
                 continue;
             }
             const MessageHeader response = make_header(MessageType::REGION_INFO_RESPONSE,
                 request.message_id, node_id_, request.sender_id);
-            if (!send_message(fd, response, reply, error)) return;
+            if (!send_message(fd, response, reply, error)) return false;
             continue;
         }
 
@@ -417,15 +436,53 @@ void NetworkManager::handle_connection(int fd) {
                    payload.empty()) {
             response.type = static_cast<uint16_t>(MessageType::NODE_LIST_RESPONSE);
             if (!serialize_nodes(nodes(), reply, error)) {
-                if (!send_error(fd, request, ErrorCode::OUT_OF_MEMORY, error)) return;
+                if (!send_error(fd, request, ErrorCode::OUT_OF_MEMORY, error)) return false;
                 continue;
             }
         } else {
-            if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return;
+            if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
             continue;
         }
 
-        if (!send_message(fd, response, reply, error)) return;
+        if (!send_message(fd, response, reply, error)) return false;
+    }
+    return false;
+}
+
+void* NetworkManager::page_worker_entry(void* context) {
+    static_cast<NetworkManager*>(context)->page_worker_loop();
+    return nullptr;
+}
+
+void NetworkManager::page_worker_loop() {
+    while (true) {
+        pthread_mutex_lock(&mutex_);
+        while (running_ && page_jobs_.empty()) pthread_cond_wait(&page_ready_, &mutex_);
+        if (!running_) {
+            pthread_mutex_unlock(&mutex_);
+            return;
+        }
+        const PageJob job = page_jobs_.front();
+        page_jobs_.pop();
+        pthread_mutex_unlock(&mutex_);
+
+        // Las transferencias no ocupan los workers que reciben INVALIDATE y JOIN.
+        PageData data;
+        std::vector<uint8_t> payload;
+        std::string error;
+        if (!page_request_handler_(job.request, job.header.sender_id, data, error)) {
+            send_error(job.fd, job.header, ErrorCode::INVALID_STATE, error);
+        } else if (!serialize_page_data(data, payload, error)) {
+            send_error(job.fd, job.header, ErrorCode::INVALID_STATE, error);
+        } else {
+            const MessageHeader response = make_header(MessageType::PAGE_DATA,
+                job.header.message_id, node_id_, job.header.sender_id);
+            send_message(job.fd, response, payload, error);
+        }
+        pthread_mutex_lock(&mutex_);
+        connections_.erase(job.fd);
+        close(job.fd);
+        pthread_mutex_unlock(&mutex_);
     }
 }
 
@@ -445,7 +502,9 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
         error = "destino de PAGE_REQUEST invalido";
         return false;
     }
-    const int fd = connect_to(owner.ip_address, owner.tcp_port, error);
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(config_.request_timeout_ms);
+    const int fd = connect_to(owner.ip_address, owner.tcp_port, error, deadline);
     if (fd == -1) return false;
 
     const uint64_t message_id = next_message_++;
@@ -455,8 +514,8 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
     MessageHeader incoming{};
     std::vector<uint8_t> reply;
     bool ok = serialize_page_request(request, payload, error) &&
-              send_message(fd, outgoing, payload, error) &&
-              recv_message(fd, incoming, reply, error);
+              send_message(fd, outgoing, payload, error, deadline) &&
+              recv_message(fd, incoming, reply, error, deadline);
     if (ok) {
         if (incoming.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE)) {
             error = "el dueno rechazo PAGE_REQUEST";
@@ -488,14 +547,16 @@ bool NetworkManager::invalidate(const NodeInfo& target, const InvalidateMessage&
     }
     std::vector<uint8_t> payload;
     if (!serialize_invalidate(request, payload, error)) return false;
-    const int fd = connect_to(target.ip_address, target.tcp_port, error);
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(config_.request_timeout_ms);
+    const int fd = connect_to(target.ip_address, target.tcp_port, error, deadline);
     if (fd == -1) return false;
     const MessageHeader outgoing = make_header(MessageType::INVALIDATE,
         next_message_++, node_id_, target.id);
     MessageHeader incoming{};
     std::vector<uint8_t> reply;
     auto receive = [&] {
-        if (!recv_message(fd, incoming, reply, error)) return false;
+        if (!recv_message(fd, incoming, reply, error, deadline)) return false;
         if (incoming.message_id != outgoing.message_id || incoming.sender_id != target.id ||
             incoming.receiver_id != node_id_) {
             error = "respuesta a INVALIDATE sin correlacion";
@@ -503,7 +564,7 @@ bool NetworkManager::invalidate(const NodeInfo& target, const InvalidateMessage&
         }
         return true;
     };
-    bool ok = send_message(fd, outgoing, payload, error) && receive();
+    bool ok = send_message(fd, outgoing, payload, error, deadline) && receive();
     if (ok && incoming.type == static_cast<uint16_t>(MessageType::PAGE_DATA)) {
         ok = deserialize_page_data(reply, writeback, error) &&
              writeback.page_id == request.page_id && writeback.region_id == request.region_id &&
@@ -607,7 +668,11 @@ void NetworkManager::leave() {
     }
 }
 
-int NetworkManager::connect_to(const std::string& host, uint16_t port, std::string& error) {
+int NetworkManager::connect_to(const std::string& host, uint16_t port, std::string& error,
+                                IODeadline deadline) {
+    if (deadline == IODeadline::max()) {
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.request_timeout_ms);
+    }
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -651,9 +716,29 @@ int NetworkManager::connect_to(const std::string& host, uint16_t port, std::stri
         timeval timeout{};
         timeout.tv_sec = config_.request_timeout_ms / 1000;
         timeout.tv_usec = (config_.request_timeout_ms % 1000) * 1000;
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0 &&
-            connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
+        const int flags = fcntl(fd, F_GETFL);
+        bool ok = flags != -1 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 &&
+                  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+                  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
+        if (ok && connect(fd, address->ai_addr, address->ai_addrlen) == -1) {
+            ok = errno == EINPROGRESS;
+            while (ok) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+                if (left <= 0) { ok = false; errno = ETIMEDOUT; break; }
+                pollfd output{fd, POLLOUT, 0};
+                const int wait_ms = static_cast<int>(std::min<int64_t>(left, std::numeric_limits<int>::max()));
+                const int ready = poll(&output, 1, wait_ms);
+                if (ready < 0 && errno == EINTR) continue;
+                int failure = 0;
+                socklen_t size = sizeof(failure);
+                ok = ready > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &failure, &size) == 0 && failure == 0;
+                if (ready == 0) errno = ETIMEDOUT;
+                else if (failure) errno = failure;
+                break;
+            }
+        }
+        if (ok && fcntl(fd, F_SETFL, flags) == 0) {
             connected = fd;
             break;
         }
@@ -700,6 +785,7 @@ bool NetworkManager::join(const std::string& bootstrap, std::string& error) {
     MessageHeader response{};
     std::vector<NodeInfo> bootstrap_node;
     std::vector<NodeInfo> participants;
+    history_.record(local_node(), HistoryEvent::JOIN_SENT);
     bool ok = serialize_nodes({local_node()}, payload, error) &&
               send_message(fd, request, payload, error) &&
               recv_message(fd, response, payload, error);
@@ -750,6 +836,9 @@ bool NetworkManager::join(const std::string& bootstrap, std::string& error) {
         !node_table_.merge(participants, error)) {
         return false;
     }
+    for (const auto& node : participants) {
+        history_.record(node, node.id == node_id_ ? HistoryEvent::JOIN_ACCEPTED : HistoryEvent::NODE_DISCOVERED);
+    }
     std::cout << "[" << config_.node_name << "] incorporado mediante " << bootstrap
               << ", nodos conocidos: " << nodes().size() << "\n" << std::flush;
     return true;
@@ -774,6 +863,7 @@ bool NetworkManager::handle_join(int fd, const MessageHeader& request,
         return send_error(fd, request, ErrorCode::INVALID_STATE, error);
     }
 
+    history_.record(newcomer, HistoryEvent::JOIN_ACCEPTED);
     const auto participants = nodes();
     std::vector<uint8_t> reply;
     MessageHeader response = make_header(MessageType::JOIN_RESPONSE,

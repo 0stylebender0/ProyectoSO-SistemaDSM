@@ -45,6 +45,8 @@ bool FaultQueue::push(const FaultEvent& event) const {
 }
 
 bool FaultQueue::pop(FaultEvent& event) const {
+    // Solo los workers toman este lock; el handler sigue usando write sin mutex.
+    std::lock_guard<std::mutex> lock(read_mutex_);
     auto* data = reinterpret_cast<char*>(&event);
     std::size_t received = 0;
     while (received < sizeof(event)) {

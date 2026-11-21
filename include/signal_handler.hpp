@@ -6,6 +6,8 @@
 #include <signal.h>
 
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,7 +34,8 @@ private:
 
 class SignalHandler {
 public:
-    explicit SignalHandler(MemoryManager& memory, FaultCallback callback = {});
+    explicit SignalHandler(MemoryManager& memory, FaultCallback callback = {},
+                           std::size_t worker_count = 4);
     ~SignalHandler();
 
     SignalHandler(const SignalHandler&) = delete;
@@ -54,12 +57,13 @@ private:
     FaultQueue queue_;
     FaultThread thread_;
     std::vector<int> permissions_;
+    std::unique_ptr<std::mutex[]> permission_mutexes_;
     sigset_t wait_mask_{};
     struct sigaction previous_segv_{};
     struct sigaction previous_usr1_{};
-    pthread_t worker_{};
+    std::vector<pthread_t> workers_;
+    std::size_t worker_count_;
     pid_t pid_ = 0;
     bool segv_installed_ = false;
     bool usr1_installed_ = false;
-    bool worker_started_ = false;
 };

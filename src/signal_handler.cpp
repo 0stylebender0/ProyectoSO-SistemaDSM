@@ -67,8 +67,8 @@ void FaultThread::reset() {
     pthread_sigmask(SIG_SETMASK, &previous_mask_, nullptr);
 }
 
-SignalHandler::SignalHandler(MemoryManager& memory, FaultCallback callback)
-    : memory_(memory), callback_(std::move(callback)) {}
+SignalHandler::SignalHandler(MemoryManager& memory, FaultCallback callback, std::size_t worker_count)
+    : memory_(memory), callback_(std::move(callback)), worker_count_(worker_count) {}
 
 SignalHandler::~SignalHandler() {
     stop();
@@ -87,12 +87,19 @@ bool SignalHandler::start(std::string& error) {
         error = "debe reservarse la memoria antes de iniciar el handler";
         return false;
     }
+    if (worker_count_ == 0) {
+        error = "FaultWorker requiere al menos un hilo";
+        return false;
+    }
     if (!thread_.prepare(error)) return false;
     if (!queue_.open(error)) {
         thread_.reset();
         return false;
     }
-    permissions_.assign(memory_.page_count(), PROT_NONE);
+    if (!callback_) {
+        permissions_.assign(memory_.page_count(), PROT_NONE);
+        permission_mutexes_ = std::make_unique<std::mutex[]>(memory_.page_count());
+    }
     pid_ = getpid();
     sigfillset(&wait_mask_);
     sigdelset(&wait_mask_, SIGUSR1);
@@ -124,22 +131,25 @@ bool SignalHandler::start(std::string& error) {
         return false;
     }
     segv_installed_ = true;
-    const int result = pthread_create(&worker_, nullptr, worker_entry, this);
-    if (result != 0) {
-        error = std::string("no se pudo crear FaultWorker: ") + std::strerror(result);
-        stop();
-        return false;
+    for (std::size_t i = 0; i < worker_count_; ++i) {
+        pthread_t worker{};
+        const int result = pthread_create(&worker, nullptr, worker_entry, this);
+        if (result != 0) {
+            error = std::string("no se pudo crear FaultWorker: ") + std::strerror(result);
+            stop();
+            return false;
+        }
+        workers_.push_back(worker);
     }
-    worker_started_ = true;
     return true;
 }
 
 void SignalHandler::stop() {
-    if (worker_started_) {
+    for (std::size_t i = 0; i < workers_.size(); ++i) {
         if (!queue_.push(FaultEvent{})) _exit(1);
-        pthread_join(worker_, nullptr);
-        worker_started_ = false;
     }
+    for (pthread_t worker : workers_) pthread_join(worker, nullptr);
+    workers_.clear();
     if (segv_installed_) sigaction(SIGSEGV, &previous_segv_, nullptr);
     if (usr1_installed_) sigaction(SIGUSR1, &previous_usr1_, nullptr);
     segv_installed_ = false;
@@ -149,6 +159,7 @@ void SignalHandler::stop() {
     queue_.close();
     thread_.reset();
     permissions_.clear();
+    permission_mutexes_.reset();
 }
 
 void SignalHandler::handle_wakeup(int) {
@@ -199,6 +210,7 @@ void SignalHandler::resolve_faults() {
                 _exit(1);
             }
         } else {
+            std::lock_guard<std::mutex> lock(permission_mutexes_[event.page_id]);
             int& permissions = permissions_[event.page_id];
             // Una lectura pendiente no debe quitar escritura habilitada por otro fallo.
             permissions |= PROT_READ | (event.write ? PROT_WRITE : 0);

@@ -110,6 +110,17 @@ target_link_libraries(test_msi PRIVATE Threads::Threads)
 add_test(NAME msi COMMAND test_msi)
 set_tests_properties(msi PROPERTIES TIMEOUT 40)
 
+add_executable(test_concurrency
+    tests/test_concurrency.cpp
+    src/network.cpp src/protocol.cpp src/node.cpp src/pager.cpp
+    src/memory_manager.cpp src/fault_queue.cpp src/signal_handler.cpp src/dsm_node.cpp
+)
+target_include_directories(test_concurrency PRIVATE include)
+target_compile_options(test_concurrency PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_concurrency PRIVATE Threads::Threads)
+add_test(NAME concurrency COMMAND test_concurrency)
+set_tests_properties(concurrency PROPERTIES TIMEOUT 40)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME console COMMAND "${Python3_EXECUTABLE}"

@@ -3,10 +3,12 @@
 #include "memory_manager.hpp"
 #include "page.hpp"
 #include "protocol.hpp"
+#include "statistics.hpp"
 
 #include <functional>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -45,6 +47,7 @@ public:
     bool invalidate_page(const InvalidateMessage& message, NodeId sender,
                          PageData& writeback, std::string& error);
     bool control_info(PageId page_id, GlobalPageControl& out) const;
+    StatisticsSnapshot statistics() const { return statistics_.snapshot(); }
 
     bool page_info(PageId page_id, PageInfo& out) const;
     std::vector<PageInfo> page_snapshot() const;
@@ -58,18 +61,38 @@ public:
     uint32_t page_size() const { return memory_.page_size(); }
 
 private:
+    struct PageEntry;
+    std::shared_ptr<PageEntry> find_page(PageId page_id) const;
+    std::shared_ptr<PageEntry> find_region_page(RegionId region_id, uint64_t offset) const;
     bool attach_locked(const RegionDescriptor& descriptor, uint64_t first_page,
                        std::string& error);
-    bool serve_locked(const PageRequest& request, NodeId requester, PageId page_id,
+    bool serve_locked(const PageRequest& request, NodeId requester, PageEntry& entry,
                       PageData& response, std::unique_lock<std::mutex>& lock,
                       std::string& error);
 
     struct PageSync {
-        bool fetching = false;
         uint64_t epoch = 0;
         uint64_t invalidation_version = 0;
         NodeId grant_recipient = 0;
         PageData writeback;
+    };
+
+    struct PendingFault {
+        std::condition_variable ready;
+        bool done = false;
+        bool success = false;
+        std::string error;
+    };
+
+    struct PageEntry {
+        mutable std::mutex mutex;
+        std::condition_variable ready;
+        PageInfo page;
+        RegionInfo region;
+        PageSync sync;
+        GlobalPageControl control;
+        std::vector<uint8_t> backing;
+        std::shared_ptr<PendingFault> pending;
     };
 
     MemoryManager& memory_;
@@ -78,13 +101,11 @@ private:
     PageInvalidator invalidator_;
     uint32_t timeout_ms_;
 
-    // Protege las tablas; las esperas de red se realizan sin este mutex.
+    // El mutex de tablas se libera antes de tomar el de una pagina.
+    // Ningun mutex del Pager se mantiene durante llamadas de red.
     mutable std::mutex mutex_;
-    std::condition_variable ready_;
-    LocalPageTable pages_;
-    std::unordered_map<PageId, PageSync> sync_;
-    std::unordered_map<PageId, GlobalPageControl> controls_;
-    std::unordered_map<PageId, std::vector<uint8_t>> backing_;
+    std::unordered_map<PageId, std::shared_ptr<PageEntry>> pages_;
     RegionTable regions_;
+    Statistics statistics_;
     uint64_t next_free_page_ = 0;
 };

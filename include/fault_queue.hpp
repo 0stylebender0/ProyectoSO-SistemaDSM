@@ -3,6 +3,7 @@
 #include "memory_manager.hpp"
 
 #include <sys/types.h>
+#include <mutex>
 
 struct FaultEvent {
     pid_t tid = 0;
@@ -27,4 +28,5 @@ public:
 private:
     int read_fd_ = -1;
     int write_fd_ = -1;
+    mutable std::mutex read_mutex_;
 };
