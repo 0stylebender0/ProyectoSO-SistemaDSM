@@ -10,7 +10,7 @@
 #include <vector>
 
 constexpr uint32_t DSM_MAGIC = 0x44534D31u;  // "DSM1" en ASCII
-constexpr uint16_t DSM_PROTOCOL_VERSION = 3;
+constexpr uint16_t DSM_PROTOCOL_VERSION = 4;
 constexpr std::size_t DSM_HEADER_SIZE = 44;
 constexpr uint32_t DSM_MAX_PAYLOAD_SIZE = 1024u * 1024u;  // 1 MiB
 
@@ -47,7 +47,17 @@ enum class MessageType : uint16_t {
     NODE_LEAVE_ACK      = 16,
     REGION_INFO_REQUEST  = 17,
     REGION_INFO_RESPONSE = 18,
+    REGION_LIST_REQUEST  = 19,
+    REGION_LIST_RESPONSE = 20,
 };
+
+// Banderas opcionales del payload de STATUS_REQUEST. Un payload vacio
+// conserva la respuesta basica usada por dsm_status sin opciones.
+constexpr uint8_t STATUS_FLAG_HISTORY = 0x01;
+constexpr uint8_t STATUS_FLAG_PAGES   = 0x02;
+constexpr uint8_t STATUS_FLAG_STATS   = 0x04;
+constexpr uint8_t STATUS_FLAG_ALL     =
+    STATUS_FLAG_HISTORY | STATUS_FLAG_PAGES | STATUS_FLAG_STATS;
 
 enum class ErrorCode : uint16_t {
     INVALID_MESSAGE    = 1,
@@ -160,6 +170,11 @@ bool serialize_region_info_response(const RegionInfoResponse& response,
                                     std::vector<uint8_t>& out, std::string& error);
 bool deserialize_region_info_response(const std::vector<uint8_t>& data,
                                       RegionInfoResponse& out, std::string& error);
+
+bool serialize_regions(const std::vector<RegionDescriptor>& regions,
+                       std::vector<uint8_t>& out, std::string& error);
+bool deserialize_regions(const std::vector<uint8_t>& data,
+                         std::vector<RegionDescriptor>& out, std::string& error);
 
 bool serialize_invalidate(const InvalidateMessage& message,
                           std::vector<uint8_t>& out, std::string& error);

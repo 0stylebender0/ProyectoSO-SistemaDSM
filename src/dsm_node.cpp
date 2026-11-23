@@ -1,4 +1,5 @@
 #include "dsm_node.hpp"
+#include "status_report.hpp"
 
 #include <utility>
 
@@ -51,6 +52,21 @@ DSMNode::DSMNode(MemoryManager& memory, NetworkManager& network, NodeId local_id
             }
             descriptor = info.descriptor;
             return true;
+        });
+
+    network_.set_region_list_handler(
+        [this](std::vector<RegionDescriptor>& regions, std::string& error) {
+            (void)error;
+            regions.clear();
+            for (const auto& info : pager_.region_snapshot()) {
+                regions.push_back(info.descriptor);
+            }
+            return true;
+        });
+
+    network_.set_status_handler(
+        [this](uint8_t flags) {
+            return status_report::sections(pager_, network_, flags);
         });
 }
 

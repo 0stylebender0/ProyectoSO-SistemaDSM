@@ -489,6 +489,16 @@ bool Pager::control_info(PageId page_id, GlobalPageControl& out) const {
     return true;
 }
 
+StatisticsSnapshot Pager::statistics() const {
+    StatisticsSnapshot result = statistics_.snapshot();
+    const auto pages = page_snapshot();
+    for (const auto& page : pages) {
+        if (page.owner_id == local_id_) ++result.pages_owned;
+        if (page.state == MSIState::SHARED && page.locally_present) ++result.pages_shared;
+    }
+    return result;
+}
+
 bool Pager::page_info(PageId page_id, PageInfo& out) const {
     auto entry = find_page(page_id);
     if (!entry) return false;

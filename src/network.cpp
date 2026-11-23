@@ -362,6 +362,7 @@ bool NetworkManager::handle_connection(int fd) {
                 const MessageHeader data = make_header(MessageType::PAGE_DATA,
                     request.message_id, node_id_, request.sender_id);
                 if (!send_message(fd, data, reply, error)) return false;
+                traffic_.bytes_sent(writeback.data.size());
             }
             if (!serialize_invalidate(message, reply, error)) return false;
             const MessageHeader ack = make_header(MessageType::INVALIDATE_ACK,
@@ -420,17 +421,52 @@ bool NetworkManager::handle_connection(int fd) {
             if (!send_message(fd, response, reply, error)) return false;
             continue;
         }
+        if (request.type == static_cast<uint16_t>(MessageType::REGION_LIST_REQUEST)) {
+            if (!payload.empty()) {
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
+                continue;
+            }
+            if (!region_list_handler_) {
+                if (!send_error(fd, request, ErrorCode::PAGE_NOT_FOUND, error)) return false;
+                continue;
+            }
+            std::vector<RegionDescriptor> regions;
+            if (!region_list_handler_(regions, error)) {
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
+                continue;
+            }
+            std::vector<uint8_t> reply;
+            if (!serialize_regions(regions, reply, error)) {
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
+                continue;
+            }
+            const MessageHeader response = make_header(MessageType::REGION_LIST_RESPONSE,
+                request.message_id, node_id_, request.sender_id);
+            if (!send_message(fd, response, reply, error)) return false;
+            continue;
+        }
 
         MessageHeader response = make_header(MessageType::STATUS_RESPONSE,
             request.message_id, node_id_, request.sender_id);
 
         std::vector<uint8_t> reply;
         if (request.type == static_cast<uint16_t>(MessageType::STATUS_REQUEST) &&
-            payload.empty()) {
+            (payload.empty() || payload.size() == 1)) {
+            const uint8_t flags = payload.empty() ? 0 : payload[0];
+            if ((flags & static_cast<uint8_t>(~STATUS_FLAG_ALL)) != 0) {
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
+                continue;
+            }
+            if (flags != 0 && !status_handler_) {
+                if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
+                continue;
+            }
             response.type = static_cast<uint16_t>(MessageType::STATUS_RESPONSE);
-            const std::string status = "node_name=" + config_.node_name +
+            std::string status = "node_name=" + config_.node_name +
+                "\nnode_id=" + std::to_string(node_id_) +
                 "\ntcp_port=" + std::to_string(port_) +
                 "\nworker_count=" + std::to_string(config_.worker_count) + "\n";
+            if (flags != 0) status += status_handler_(flags);
             reply.assign(status.begin(), status.end());
         } else if (request.type == static_cast<uint16_t>(MessageType::NODE_LIST_REQUEST) &&
                    payload.empty()) {
@@ -477,7 +513,9 @@ void NetworkManager::page_worker_loop() {
         } else {
             const MessageHeader response = make_header(MessageType::PAGE_DATA,
                 job.header.message_id, node_id_, job.header.sender_id);
-            send_message(job.fd, response, payload, error);
+            if (send_message(job.fd, response, payload, error)) {
+                traffic_.bytes_sent(data.data.size());
+            }
         }
         pthread_mutex_lock(&mutex_);
         connections_.erase(job.fd);
@@ -532,6 +570,7 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
             ok = false;
         } else {
             ok = deserialize_page_data(reply, response, error);
+            if (ok) traffic_.bytes_received(response.data.size());
         }
     }
     close_outgoing(fd);
@@ -569,6 +608,7 @@ bool NetworkManager::invalidate(const NodeInfo& target, const InvalidateMessage&
         ok = deserialize_page_data(reply, writeback, error) &&
              writeback.page_id == request.page_id && writeback.region_id == request.region_id &&
              writeback.region_offset == request.region_offset && receive();
+        if (ok && !writeback.data.empty()) traffic_.bytes_received(writeback.data.size());
     }
     if (ok && (incoming.type != static_cast<uint16_t>(MessageType::INVALIDATE_ACK) ||
                reply != payload)) {
@@ -630,6 +670,45 @@ bool NetworkManager::query_region(const NodeInfo& owner, RegionId region_id,
                 out.size = info.size;
                 out.page_size = info.page_size;
             }
+        }
+    }
+    close_outgoing(fd);
+    return ok;
+}
+
+bool NetworkManager::query_regions(const NodeInfo& owner,
+                                   std::vector<RegionDescriptor>& out,
+                                   std::string& error) {
+    if (owner.id == 0 || owner.id == node_id_) {
+        error = "destino de REGION_LIST_REQUEST invalido";
+        return false;
+    }
+    const int fd = connect_to(owner.ip_address, owner.tcp_port, error);
+    if (fd == -1) return false;
+
+    const uint64_t message_id = next_message_++;
+    const MessageHeader outgoing = make_header(MessageType::REGION_LIST_REQUEST,
+        message_id, node_id_, owner.id);
+    MessageHeader incoming{};
+    std::vector<uint8_t> reply;
+    bool ok = send_message(fd, outgoing, {}, error) &&
+              recv_message(fd, incoming, reply, error);
+    if (ok) {
+        if (incoming.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE)) {
+            error = "el dueno rechazo REGION_LIST_REQUEST";
+            if (reply.size() == 2) {
+                error += " (codigo " +
+                    std::to_string((reply[0] << 8) | reply[1]) + ")";
+            }
+            ok = false;
+        } else if (incoming.type != static_cast<uint16_t>(MessageType::REGION_LIST_RESPONSE) ||
+                   incoming.message_id != message_id ||
+                   incoming.sender_id != owner.id ||
+                   incoming.receiver_id != node_id_) {
+            error = "REGION_LIST_RESPONSE invalida";
+            ok = false;
+        } else {
+            ok = deserialize_regions(reply, out, error);
         }
     }
     close_outgoing(fd);

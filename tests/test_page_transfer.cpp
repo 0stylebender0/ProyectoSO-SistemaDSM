@@ -128,6 +128,27 @@ namespace {
                 decoded_response.size == info_response.size &&
                 decoded_response.page_size == info_response.page_size,
                 "ida y vuelta de REGION_INFO_RESPONSE");
+
+        std::vector<RegionDescriptor> regions;
+        RegionDescriptor descriptor;
+        descriptor.region_id = 0x2122232425262728ULL;
+        descriptor.owner_id = info_response.owner_id;
+        descriptor.size = static_cast<uint64_t>(page) * 3;
+        descriptor.page_size = page;
+        regions.push_back(descriptor);
+        require(serialize_regions(regions, bytes, error), error);
+        std::vector<RegionDescriptor> decoded_regions;
+        require(deserialize_regions(bytes, decoded_regions, error), error);
+        require(decoded_regions.size() == 1 &&
+                decoded_regions[0].region_id == descriptor.region_id &&
+                decoded_regions[0].owner_id == descriptor.owner_id &&
+                decoded_regions[0].size == descriptor.size &&
+                decoded_regions[0].page_size == descriptor.page_size,
+                "ida y vuelta de REGION_LIST");
+        auto bad_regions = bytes;
+        bad_regions.insert(bad_regions.end(), {0});
+        require(!deserialize_regions(bad_regions, decoded_regions, error),
+                "rechazar REGION_LIST con bytes sobrantes");
     }
 
     void remote_reads() {

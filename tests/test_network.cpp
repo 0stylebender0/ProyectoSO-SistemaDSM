@@ -52,14 +52,15 @@ MessageHeader status_request(uint64_t message_id) {
     return header;
 }
 
-bool query_status(int fd, uint16_t port, uint64_t message_id) {
+bool query_status(int fd, uint16_t port, NodeId node_id, uint64_t message_id) {
     MessageHeader response{};
     std::vector<uint8_t> payload;
     std::string error;
     if (!send_message(fd, status_request(message_id), {}, error) ||
         !recv_message(fd, response, payload, error)) return false;
 
-    const std::string expected = "node_name=test_node\ntcp_port=" +
+    const std::string expected = "node_name=test_node\nnode_id=" +
+        std::to_string(node_id) + "\ntcp_port=" +
         std::to_string(port) + "\nworker_count=2\n";
     return response.type == static_cast<uint16_t>(MessageType::STATUS_RESPONSE) &&
            response.sender_id != 0 &&
@@ -84,12 +85,13 @@ int main() {
     if (!started) return 1;
     const uint16_t port = network.port();
     check(port != 0, "puerto asignado por el SO");
+    const NodeId node_id = network.node_id();
 
     const int fd = connect_to(port);
     check(fd != -1, "abrir conexion TCP");
     if (fd != -1) {
-        check(query_status(fd, port, 1), "STATUS_REQUEST y contenido de STATUS_RESPONSE");
-        check(query_status(fd, port, 2), "reutilizar la misma conexion");
+        check(query_status(fd, port, node_id, 1), "STATUS_REQUEST y contenido de STATUS_RESPONSE");
+        check(query_status(fd, port, node_id, 2), "reutilizar la misma conexion");
 
         MessageHeader unsupported = status_request(3);
         unsupported.type = 65535;
@@ -112,7 +114,7 @@ int main() {
         clients.emplace_back([&, i] {
             const int client = connect_to(port);
             if (client == -1) return;
-            results[i] = query_status(client, port, 100 + i);
+            results[i] = query_status(client, port, node_id, 100 + i);
             close(client);
         });
     }

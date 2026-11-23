@@ -1,9 +1,11 @@
 #include "config.hpp"
+#include "demo_app.hpp"
 #include "dsm_node.hpp"
 #include "memory_manager.hpp"
 #include "network.hpp"
 #include "node.hpp"
 #include "signal_handler.hpp"
+#include "status_report.hpp"
 
 #include <pthread.h>
 #include <poll.h>
@@ -16,12 +18,14 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <string>
 
 struct CliOptions {
     std::string config_path = "config/dsm.conf";
     std::string bootstrap;
     std::string node_name;
+    std::string app_name;
     int tcp_port = -1;
     bool help = false;
 };
@@ -33,6 +37,8 @@ static void print_usage(const char* prog) {
         << "  --bootstrap <host:puerto>  Nodo semilla\n"
         << "  --name <nombre>            Override de node_name\n"
         << "  --tcp-port <puerto>        Override de tcp_port\n"
+        << "  --demo-app                 Aplicacion de patron y verificacion\n"
+        << "  --app <nombre>             Nombre de la aplicacion de prueba\n"
         << "  --help                     Muestra esta ayuda\n";
 }
 
@@ -59,6 +65,13 @@ static bool parse_args(int argc, char** argv, CliOptions& opt) {
                 opt.tcp_port = std::stoi(value);
             } catch (...) {
                 std::cerr << "Puerto invalido: " << value << "\n";
+                return false;
+            }
+        } else if (arg == "--demo-app") {
+            opt.app_name = "demo";
+        } else if (arg == "--app") {
+            if (!next(opt.app_name) || opt.app_name.empty()) {
+                std::cerr << "--app requiere un nombre\n";
                 return false;
             }
         } else if (arg == "--help" || arg == "-h") {
@@ -153,6 +166,17 @@ static void print_nodes(const Config& cfg, const NetworkManager& network) {
     }
 }
 
+static void print_history(const Config& cfg, const NetworkManager& network) {
+    std::cout << "[" << cfg.node_name << "] historial\n"
+              << status_report::history(network.history()) << std::flush;
+}
+
+static void print_statistics(const Config& cfg, const Pager& pager,
+                             const NetworkManager& network) {
+    std::cout << "[" << cfg.node_name << "] estadisticas\n"
+              << status_report::statistics(pager, network) << std::flush;
+}
+
 void print_info(const Config& cfg, const MemoryManager& memory, const NetworkManager& network,
                 const Pager& pager, const CliOptions& opt) {
     std::cout << "[" << cfg.node_name << "] config\t\t\t" << opt.config_path << "\n";
@@ -189,13 +213,17 @@ static bool handle_command(const std::string& line, const Config& cfg,
         print_memory(cfg, memory);
     } else if (command == "pages") {
         print_pages(cfg, pager);
+    } else if (command == "history") {
+        print_history(cfg, network);
+    } else if (command == "stats") {
+        print_statistics(cfg, pager, network);
     } else if (command == "quit") {
         return false;
     } else if (command == "info") {
         print_info(cfg, memory, network, pager, opt);
     } else {
         std::cout << "Comando desconocido: " << command << "\n"
-                  << "Comandos: nodes, memory, pages, info, quit\n";
+                  << "Comandos: nodes, memory, pages, history, stats, info, quit\n";
     }
     std::cout << std::flush;
     return true;
@@ -213,7 +241,7 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
     std::string pending;
     bool running = true;
     bool ok = true;
-    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, pages, info, quit\n" << std::flush;
+    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, pages, history, stats, info, quit\n" << std::flush;
 
     while (running) {
         if (poll(inputs, 2, -1) == -1) {
@@ -349,8 +377,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::unique_ptr<DemoApp> app;
+    if (!opt.app_name.empty()) {
+        app = std::make_unique<DemoApp>(node, opt.app_name, cfg.node_name);
+        if (!app->start(error)) {
+            std::cerr << "Error iniciando aplicacion: " << error << "\n";
+            network.stop();
+            return 1;
+        }
+    }
+
     const bool ok = run_console(cfg, memory, network, node.pager(), signals, opt);
+    if (app) app->stop();
     network.stop();
     std::cout << "[" << cfg.node_name << "] detenido\n";
-    return ok ? 0 : 1;
+    return (ok && (app == nullptr || app->success())) ? 0 : 1;
 }

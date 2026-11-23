@@ -8,6 +8,17 @@
 
 enum class HistoryEvent { LOCAL_START, JOIN_SENT, JOIN_ACCEPTED, NODE_DISCOVERED, ANNOUNCE_RECEIVED };
 
+inline const char* history_event_name(HistoryEvent event) {
+    switch (event) {
+        case HistoryEvent::LOCAL_START:      return "LOCAL_START";
+        case HistoryEvent::JOIN_SENT:        return "JOIN_SENT";
+        case HistoryEvent::JOIN_ACCEPTED:    return "JOIN_ACCEPTED";
+        case HistoryEvent::NODE_DISCOVERED:  return "NODE_DISCOVERED";
+        case HistoryEvent::ANNOUNCE_RECEIVED:return "ANNOUNCE_RECEIVED";
+    }
+    return "DESCONOCIDO";
+}
+
 struct HistoryEntry {
     NodeInfo node;
     uint64_t timestamp_ms;

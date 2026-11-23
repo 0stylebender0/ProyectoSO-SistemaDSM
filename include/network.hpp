@@ -4,6 +4,7 @@
 #include "connection_history.hpp"
 #include "node.hpp"
 #include "protocol.hpp"
+#include "statistics.hpp"
 
 #include <pthread.h>
 
@@ -23,6 +24,9 @@ public:
         RegionId, RegionDescriptor&, std::string&)>;
     using InvalidationHandler = std::function<bool(
         const InvalidateMessage&, NodeId, PageData&, std::string&)>;
+    using RegionListHandler = std::function<bool(
+        std::vector<RegionDescriptor>&, std::string&)>;
+    using StatusHandler = std::function<std::string(uint8_t)>;
 
     explicit NetworkManager(const Config& config, NodeId node_id = 0);
     ~NetworkManager();
@@ -44,6 +48,12 @@ public:
     void set_invalidation_handler(InvalidationHandler handler) {
         invalidation_handler_ = std::move(handler);
     }
+    void set_region_list_handler(RegionListHandler handler) {
+        region_list_handler_ = std::move(handler);
+    }
+    void set_status_handler(StatusHandler handler) {
+        status_handler_ = std::move(handler);
+    }
     bool invalidate(const NodeInfo& target, const InvalidateMessage& request,
                     PageData& writeback, std::string& error);
     uint32_t request_timeout_ms() const { return config_.request_timeout_ms; }
@@ -53,11 +63,14 @@ public:
                     PageData& response, std::string& error);
     bool query_region(const NodeInfo& owner, RegionId region_id,
                       RegionDescriptor& out, std::string& error);
+    bool query_regions(const NodeInfo& owner,
+                       std::vector<RegionDescriptor>& out, std::string& error);
 
     uint16_t port() const { return port_; }
     NodeId node_id() const { return node_id_; }
     std::vector<NodeInfo> nodes() const { return node_table_.snapshot(); }
     std::vector<HistoryEntry> history() const { return history_.snapshot(); }
+    StatisticsSnapshot statistics() const { return traffic_.snapshot(); }
 
 private:
     static void* listener_entry(void* context);
@@ -88,6 +101,9 @@ private:
     PageRequestHandler page_request_handler_;
     RegionInfoHandler region_info_handler_;
     InvalidationHandler invalidation_handler_;
+    RegionListHandler region_list_handler_;
+    StatusHandler status_handler_;
+    Statistics traffic_;
     std::atomic<uint64_t> next_message_{1};
     bool running_ = false;
     bool listener_started_ = false;

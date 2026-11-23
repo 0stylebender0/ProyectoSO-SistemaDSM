@@ -544,6 +544,78 @@ bool deserialize_region_info_response(const std::vector<uint8_t>& data,
     return true;
 }
 
+namespace {
+    constexpr std::size_t REGION_RECORD_SIZE = 8 + 8 + 8 + 4;
+
+    bool valid_region_descriptor(const RegionDescriptor& region) {
+        return region.region_id != 0 && region.owner_id != 0 &&
+               region.size != 0 && region.page_size != 0 &&
+               region.size % region.page_size == 0 &&
+               (region.page_size & (region.page_size - 1)) == 0;
+    }
+}  // namespace
+
+bool serialize_regions(const std::vector<RegionDescriptor>& regions,
+                       std::vector<uint8_t>& out, std::string& error) {
+    if (regions.size() > (DSM_MAX_PAYLOAD_SIZE - 4) / REGION_RECORD_SIZE) {
+        error = "la lista de regiones excede el maximo permitido";
+        return false;
+    }
+    std::vector<uint8_t> bytes(4 + regions.size() * REGION_RECORD_SIZE);
+    write_u32(bytes.data(), static_cast<uint32_t>(regions.size()));
+    std::size_t offset = 4;
+    for (const auto& region : regions) {
+        if (!valid_region_descriptor(region)) {
+            error = "RegionDescriptor invalido en la lista";
+            return false;
+        }
+        write_u64(bytes.data() + offset, region.region_id);
+        write_u64(bytes.data() + offset + 8, region.owner_id);
+        write_u64(bytes.data() + offset + 16, region.size);
+        write_u32(bytes.data() + offset + 24, region.page_size);
+        offset += REGION_RECORD_SIZE;
+    }
+    out = std::move(bytes);
+    return true;
+}
+
+bool deserialize_regions(const std::vector<uint8_t>& data,
+                         std::vector<RegionDescriptor>& out, std::string& error) {
+    if (data.size() < 4 || data.size() > DSM_MAX_PAYLOAD_SIZE) {
+        error = "lista de regiones incompleta o demasiado grande";
+        return false;
+    }
+    const uint32_t count = read_u32(data.data());
+    if (count > (data.size() - 4) / REGION_RECORD_SIZE ||
+        data.size() != 4 + static_cast<std::size_t>(count) * REGION_RECORD_SIZE) {
+        error = "cantidad de regiones no coincide con el mensaje";
+        return false;
+    }
+    std::vector<RegionDescriptor> regions;
+    regions.reserve(count);
+    std::set<RegionId> ids;
+    std::size_t offset = 4;
+    for (uint32_t i = 0; i < count; ++i) {
+        RegionDescriptor region;
+        region.region_id = read_u64(data.data() + offset);
+        region.owner_id = read_u64(data.data() + offset + 8);
+        region.size = read_u64(data.data() + offset + 16);
+        region.page_size = read_u32(data.data() + offset + 24);
+        if (!valid_region_descriptor(region)) {
+            error = "RegionDescriptor invalido en la lista";
+            return false;
+        }
+        if (!ids.insert(region.region_id).second) {
+            error = "RegionId repetido en la lista";
+            return false;
+        }
+        regions.push_back(region);
+        offset += REGION_RECORD_SIZE;
+    }
+    out = std::move(regions);
+    return true;
+}
+
 bool serialize_invalidate(const InvalidateMessage& message,
                           std::vector<uint8_t>& out, std::string& error) {
     if (message.region_id == 0 || message.new_owner == 0 ||

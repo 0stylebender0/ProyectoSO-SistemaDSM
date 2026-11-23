@@ -119,7 +119,8 @@ try:
             config.write(file)
 
         process, log, port = start_node(directory, "consola")
-        process.communicate("\n nodes \r\nmemory\ninvalido\nquit\nnodes\n", timeout=3)
+        process.communicate("\n nodes \r\nmemory\nhistory\nstats\ninvalido\nquit\nnodes\n",
+                            timeout=3)
         output = log.read_text()
         assert process.returncode == 0, output
         assert "[consola] nodos conocidos: 1" in output, output
@@ -127,6 +128,10 @@ try:
         assert output.count("10000 bytes /") == 3, output
         assert output.count("12288 bytes /") == 2, output
         assert "3 de 4096 bytes / 4 KB" in output, output
+        assert "history_count=1" in output, output
+        assert "history_nodes=consola" in output, output
+        assert "pages_owned=0" in output, output
+        assert "page_faults=0" in output, output
         assert "Comando desconocido: invalido" in output, output
         assert "[consola] detenido" in output, output
 
@@ -149,6 +154,20 @@ try:
         status = subprocess.run([str(status_binary), "127.0.0.1", str(port)],
                                 capture_output=True, text=True, timeout=3)
         assert status.returncode == 0 and "node_name=eof\n" in status.stdout, status.stderr
+        history = subprocess.run([str(status_binary), "127.0.0.1", str(port), "--history"],
+                                 capture_output=True, text=True, timeout=3)
+        assert history.returncode == 0, history.stderr
+        assert "history_count=1" in history.stdout, history.stdout
+        assert "history_nodes=eof" in history.stdout, history.stdout
+        pages = subprocess.run([str(status_binary), "127.0.0.1", str(port), "--pages"],
+                               capture_output=True, text=True, timeout=3)
+        assert pages.returncode == 0, pages.stderr
+        assert "pages_total=0" in pages.stdout, pages.stdout
+        stats = subprocess.run([str(status_binary), "127.0.0.1", str(port), "--stats"],
+                               capture_output=True, text=True, timeout=3)
+        assert stats.returncode == 0, stats.stderr
+        assert "pages_owned=0" in stats.stdout, stats.stdout
+        assert "page_faults=0" in stats.stdout, stats.stdout
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=3) == 0, log.read_text()
 
@@ -161,6 +180,25 @@ try:
         c, _, c_port = start_node(directory, "C", bootstrap=a_port)
         wait_for(lambda: members(a_port) == members(b_port) == members(c_port)
                  and len(members(a_port)) == 3, "Los tres nodos no se descubrieron")
+
+        history = subprocess.run([str(status_binary), "127.0.0.1", str(b_port), "--history"],
+                                 capture_output=True, text=True, timeout=3)
+        assert history.returncode == 0, history.stderr
+        sequence = next(line.split("=", 1)[1] for line in history.stdout.splitlines()
+                        if line.startswith("history_nodes="))
+        assert {"A", "B", "C"} <= set(sequence.split(",")), history.stdout
+        stats = subprocess.run([str(status_binary), "127.0.0.1", str(b_port), "--stats"],
+                               capture_output=True, text=True, timeout=3)
+        assert stats.returncode == 0, stats.stderr
+        for field in ("pages_owned=0", "pages_shared=0", "page_faults=0",
+                      "page_requests=0", "page_transfers=0", "bytes_sent=0",
+                      "bytes_received=0", "invalidations_sent=0",
+                      "invalidations_received=0"):
+            assert field in stats.stdout, stats.stdout
+        pages = subprocess.run([str(status_binary), "127.0.0.1", str(b_port), "--pages"],
+                               capture_output=True, text=True, timeout=3)
+        assert pages.returncode == 0, pages.stderr
+        assert "pages_total=0" in pages.stdout, pages.stdout
 
         for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, None):
             old_id = next(node_id for node_id, name in members(a_port).items() if name == "A")
@@ -182,13 +220,17 @@ try:
     base = demo_port()
     code, output, errors = run_demo(base)
     assert code == 0, output + errors
-    assert output.count("Direccion") == 3, output
+    assert output.count("app demo: OK") == 4, output
+    assert "peers=2" in output, output
+    assert "history_nodes=" in output, output
+    assert "Demo completada: historial A, B, C, A" in output, output
+    assert output.count("Direccion") == 6, output
     assert output.count("memoria reservada") == 6, output
-    assert output.count("] detenido") == 3, output
-    assert "Demo completada" in output, output
+    assert output.count("] detenido") == 4, output
     assert errors == "", errors
 
     with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         occupied.bind(("127.0.0.1", base))
         occupied.listen()
         code, output, errors = run_demo(base)

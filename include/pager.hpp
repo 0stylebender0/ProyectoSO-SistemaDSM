@@ -47,7 +47,7 @@ public:
     bool invalidate_page(const InvalidateMessage& message, NodeId sender,
                          PageData& writeback, std::string& error);
     bool control_info(PageId page_id, GlobalPageControl& out) const;
-    StatisticsSnapshot statistics() const { return statistics_.snapshot(); }
+    StatisticsSnapshot statistics() const;
 
     bool page_info(PageId page_id, PageInfo& out) const;
     std::vector<PageInfo> page_snapshot() const;
