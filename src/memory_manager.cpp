@@ -125,3 +125,18 @@ bool MemoryManager::install_page(PageId page_id, const std::vector<uint8_t>& dat
     }
     return true;
 }
+
+bool MemoryManager::reset_pages(PageId first, uint64_t count, std::string& error) {
+    if (count == 0 || first >= page_count_ || count > page_count_ - first) {
+        error = "rango de paginas invalido";
+        return false;
+    }
+    void* address = page_address(first);
+    const std::size_t length = count * page_size_;
+    if (mprotect(address, length, PROT_NONE) == -1 ||
+        madvise(address, length, MADV_DONTNEED) == -1) {
+        error = std::string("liberacion de paginas fallo: ") + std::strerror(errno);
+        return false;
+    }
+    return true;
+}

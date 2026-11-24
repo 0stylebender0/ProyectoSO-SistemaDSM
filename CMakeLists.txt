@@ -5,8 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(dsm_node
-    src/main.cpp
+find_package(Threads REQUIRED)
+
+add_library(dsm STATIC
+    src/dsm.cpp
     src/config.cpp
     src/memory_manager.cpp
     src/fault_queue.cpp
@@ -18,13 +20,25 @@ add_executable(dsm_node
     src/protocol.cpp
 )
 
-target_include_directories(dsm_node PRIVATE include)
-target_compile_options(dsm_node PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(dsm PUBLIC include)
+target_compile_options(dsm PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm PUBLIC Threads::Threads)
 
-find_package(Threads REQUIRED)
-target_link_libraries(dsm_node PRIVATE Threads::Threads)
+add_executable(dsm_node src/main.cpp src/demo_app.cpp)
+target_compile_options(dsm_node PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm_node PRIVATE dsm)
+
+add_executable(dsm_app apps/dsm_app.cpp)
+target_compile_options(dsm_app PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm_app PRIVATE dsm)
 
 enable_testing()
+
+add_executable(test_api tests/test_api.cpp)
+target_compile_options(test_api PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_api PRIVATE dsm)
+add_test(NAME api COMMAND test_api "$<TARGET_FILE:dsm_app>")
+set_tests_properties(api PROPERTIES TIMEOUT 40)
 
 add_executable(test_protocol
     tests/test_protocol.cpp

@@ -1078,6 +1078,43 @@ Sin embargo, se deberán establecer las siguientes restricciones:
 
 El API podrá ampliarse durante los siguientes prototipos según las necesidades de las aplicaciones de validación.
 
+### 9.8 API implementada en el hito 3.1
+
+La cabecera pública es `include/dsm.hpp` y la biblioteca es `build/libdsm.a`. Las aplicaciones no necesitan incluir las cabeceras de red, páginas o señales. `apps/dsm_app.cpp` muestra cómo crear una región o adjuntar una región remota mediante `DSM::attach_region(region_id, owner_id)`.
+
+```sh
+cmake -B build
+cmake --build build -j4
+ctest --test-dir build --output-on-failure
+./build/dsm_app config/dsm.conf
+```
+
+La aplicación crea una región, escribe 42 y muestra los identificadores del nodo y de la región. Permanece activa hasta recibir Enter. En otra terminal se puede ejecutar:
+
+```sh
+./build/dsm_app /ruta/al/segundo.conf REGION_ID OWNER_ID
+```
+
+El segundo archivo debe configurar otro puerto TCP, el mismo `page_size` y `bootstrap_nodes` apuntando a la dirección y puerto del primer nodo. La segunda aplicación lee 42, escribe 43, devuelve los datos al dueño y termina. Al pulsar Enter en la primera se imprime 43 y se liberan sus recursos.
+
+También se puede compilar una aplicación fuera de los targets del proyecto:
+
+```sh
+g++ -std=c++17 -Iinclude apps/dsm_app.cpp build/libdsm.a -pthread -o /tmp/dsm_app
+```
+
+Contrato de esta versión:
+
+- Existe un runtime DSM por proceso. `initialize` y `shutdown` deben ejecutarse en el mismo hilo. El hilo inicial queda preparado automáticamente para los fallos de página.
+- Cada hilo adicional debe mantener una guardia `DSMThread` durante sus accesos a memoria DSM y comprobar `valid()`. La guardia se crea y destruye en ese hilo. `shutdown` devuelve `BUSY` si todavía existen guardias o llamadas pendientes; la aplicación debe reunir sus hilos antes de apagar DSM.
+- Solo se admite `DSMAccess::READ_WRITE`. `READ` y `WRITE` devuelven `INVALID_ACCESS` porque todavía no se imponen permisos por región.
+- Los tamaños se redondean al tamaño de página configurado. `as<T>()` convierte el puntero; no construye objetos ni valida que quepan. La aplicación respeta los límites y sincroniza sus accesos concurrentes.
+- Copiar un `DSMRegion` copia su handle; destruirlo no libera la región. `release_region(id)` y `shutdown()` invalidan todas sus copias locales; `data()` devuelve `nullptr` después. Los punteros obtenidos previamente dejan de ser utilizables.
+- Antes de liberar una región se deben detener sus accesos y las otras operaciones sobre ella. Desadjuntar una región remota devuelve cualquier contenido modificado al dueño mediante `PAGE_RELEASE`. Liberarla en el dueño invalida las copias remotas y destruye la región; sus usuarios deben coordinar ese cierre. `valid()` comprueba la vida del handle local, no la disponibilidad del dueño remoto.
+- Los espacios liberados se limpian y pueden reutilizarse; los rangos libres contiguos se fusionan. Si una liberación explícita falla por timeout, conserva el handle para reintentar. `shutdown` intenta devolver los datos y cierra los recursos incluso si algún nodo no responde, informando el error.
+- `last_error()` y `last_error_message()` pertenecen al hilo que realizó la última llamada. Las consultas devuelven snapshots de nodos y estadísticas.
+- Se mantienen las restricciones actuales: Linux x86-64, uso reservado de `SIGUSR1`, sin persistencia ni recuperación de datos ante la caída del dueño. El protocolo pasa a versión 5 para incorporar la liberación con write-back; todos los nodos deben recompilarse.
+
 ---
 
 # 10. Archivo de configuración

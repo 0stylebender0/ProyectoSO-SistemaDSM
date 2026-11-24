@@ -21,6 +21,7 @@ public:
     bool protect_page(PageId page_id, int prot, std::string& error);
     bool install_page(PageId page_id, const std::vector<uint8_t>& data,
                       int prot, std::string& error);
+    bool reset_pages(PageId first, uint64_t count, std::string& error);
 
     void*    base()       const { return base_; }
     uint64_t size()       const { return size_; }

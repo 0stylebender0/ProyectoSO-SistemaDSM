@@ -24,6 +24,7 @@ public:
         RegionId, RegionDescriptor&, std::string&)>;
     using InvalidationHandler = std::function<bool(
         const InvalidateMessage&, NodeId, PageData&, std::string&)>;
+    using PageReleaseHandler = std::function<bool(const PageData&, NodeId, std::string&)>;
     using RegionListHandler = std::function<bool(
         std::vector<RegionDescriptor>&, std::string&)>;
     using StatusHandler = std::function<std::string(uint8_t)>;
@@ -48,6 +49,10 @@ public:
     void set_invalidation_handler(InvalidationHandler handler) {
         invalidation_handler_ = std::move(handler);
     }
+    void set_page_release_handler(PageReleaseHandler handler) {
+        page_release_handler_ = std::move(handler);
+    }
+    bool release_page(const NodeInfo& owner, const PageData& data, std::string& error);
     void set_region_list_handler(RegionListHandler handler) {
         region_list_handler_ = std::move(handler);
     }
@@ -101,6 +106,7 @@ private:
     PageRequestHandler page_request_handler_;
     RegionInfoHandler region_info_handler_;
     InvalidationHandler invalidation_handler_;
+    PageReleaseHandler page_release_handler_;
     RegionListHandler region_list_handler_;
     StatusHandler status_handler_;
     Statistics traffic_;
@@ -114,6 +120,7 @@ private:
         int fd;
         MessageHeader header;
         PageRequest request;
+        PageData release;
     };
     std::queue<PageJob> page_jobs_;
     pthread_cond_t page_ready_ = PTHREAD_COND_INITIALIZER;

@@ -370,6 +370,19 @@ bool NetworkManager::handle_connection(int fd) {
             if (!send_message(fd, ack, reply, error)) return false;
             continue;
         }
+        if (request.type == static_cast<uint16_t>(MessageType::PAGE_RELEASE)) {
+            PageData data;
+            if (request.sender_id == 0 || !deserialize_page_data(payload, data, error)) {
+                if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
+                continue;
+            }
+            pthread_mutex_lock(&mutex_);
+            if (!running_) { pthread_mutex_unlock(&mutex_); return false; }
+            page_jobs_.push({fd, request, {}, std::move(data)});
+            pthread_cond_signal(&page_ready_);
+            pthread_mutex_unlock(&mutex_);
+            return true;
+        }
         if (request.type == static_cast<uint16_t>(MessageType::PAGE_REQUEST)) {
             PageRequest page_request;
             if (request.sender_id == 0 ||
@@ -386,7 +399,7 @@ bool NetworkManager::handle_connection(int fd) {
                 pthread_mutex_unlock(&mutex_);
                 return false;
             }
-            page_jobs_.push({fd, request, page_request});
+            page_jobs_.push({fd, request, page_request, {}});
             pthread_cond_signal(&page_ready_);
             pthread_mutex_unlock(&mutex_);
             return true;
@@ -506,7 +519,20 @@ void NetworkManager::page_worker_loop() {
         PageData data;
         std::vector<uint8_t> payload;
         std::string error;
-        if (!page_request_handler_(job.request, job.header.sender_id, data, error)) {
+        if (job.header.type == static_cast<uint16_t>(MessageType::PAGE_RELEASE)) {
+            RegionDescriptor descriptor;
+            if (!region_info_handler_ || !region_info_handler_(job.release.region_id, descriptor, error)) {
+                send_error(job.fd, job.header, ErrorCode::PAGE_NOT_FOUND, error);
+            } else if (!page_release_handler_ ||
+                       !page_release_handler_(job.release, job.header.sender_id, error)) {
+                send_error(job.fd, job.header, ErrorCode::INVALID_STATE, error);
+            } else {
+                traffic_.bytes_received(job.release.data.size());
+                const MessageHeader ack = make_header(MessageType::PAGE_RELEASE,
+                    job.header.message_id, node_id_, job.header.sender_id);
+                send_message(job.fd, ack, {}, error);
+            }
+        } else if (!page_request_handler_(job.request, job.header.sender_id, data, error)) {
             send_error(job.fd, job.header, ErrorCode::INVALID_STATE, error);
         } else if (!serialize_page_data(data, payload, error)) {
             send_error(job.fd, job.header, ErrorCode::INVALID_STATE, error);
@@ -572,6 +598,31 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
             ok = deserialize_page_data(reply, response, error);
             if (ok) traffic_.bytes_received(response.data.size());
         }
+    }
+    close_outgoing(fd);
+    return ok;
+}
+
+bool NetworkManager::release_page(const NodeInfo& owner, const PageData& data, std::string& error) {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(config_.request_timeout_ms);
+    std::vector<uint8_t> payload;
+    if (!serialize_page_data(data, payload, error)) return false;
+    const int fd = connect_to(owner.ip_address, owner.tcp_port, error, deadline);
+    if (fd == -1) return false;
+    const MessageHeader request = make_header(MessageType::PAGE_RELEASE, next_message_++, node_id_, owner.id);
+    MessageHeader response{};
+    std::vector<uint8_t> reply;
+    bool ok = send_message(fd, request, payload, error, deadline) &&
+              recv_message(fd, response, reply, error, deadline);
+    if (ok) {
+        ok = response.message_id == request.message_id && response.sender_id == owner.id &&
+             response.receiver_id == node_id_ &&
+             ((response.type == static_cast<uint16_t>(MessageType::PAGE_RELEASE) && reply.empty()) ||
+              (response.type == static_cast<uint16_t>(MessageType::ERROR_RESPONSE) &&
+               reply == std::vector<uint8_t>({0, static_cast<uint8_t>(ErrorCode::PAGE_NOT_FOUND)})));
+        if (!ok) error = "PAGE_RELEASE rechazado o sin confirmacion valida";
+        else traffic_.bytes_sent(data.data.size());
     }
     close_outgoing(fd);
     return ok;

@@ -5,6 +5,17 @@
 
 DSMNode::DSMNode(MemoryManager& memory, NetworkManager& network, NodeId local_id)
     : memory_(memory), network_(network), pager_(memory, local_id, network.request_timeout_ms()) {
+    pager_.set_page_releaser([this](NodeId owner_id, const PageData& data, std::string& error) {
+        NodeInfo owner;
+        if (!network_.find_node(owner_id, owner)) {
+            error = "nodo dueno desconocido al liberar la pagina";
+            return false;
+        }
+        return network_.release_page(owner, data, error);
+    });
+    network_.set_page_release_handler([this](const PageData& data, NodeId sender, std::string& error) {
+        return pager_.accept_page_release(data, sender, error);
+    });
     pager_.set_page_invalidator(
         [this](NodeId target_id, const InvalidateMessage& request,
                PageData& writeback, std::string& error) {

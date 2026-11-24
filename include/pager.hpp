@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ using PageFetcher =
     std::function<bool(const RemotePageQuery&, PageData&, std::string&)>;
 using PageInvalidator = std::function<bool(
     NodeId, const InvalidateMessage&, PageData&, std::string&)>;
+using PageReleaser = std::function<bool(NodeId, const PageData&, std::string&)>;
 
 class Pager {
 public:
@@ -37,9 +39,12 @@ public:
     // Se configura antes de que el FaultWorker pueda atender un fallo remoto.
     void set_page_fetcher(PageFetcher fetcher);
     void set_page_invalidator(PageInvalidator invalidator);
+    void set_page_releaser(PageReleaser releaser);
 
     bool create_region(uint64_t size, RegionId& region_id, std::string& error);
     bool attach_region(const RegionDescriptor& descriptor, std::string& error);
+    bool release_region(RegionId region_id, std::string& error);
+    bool accept_page_release(const PageData& data, NodeId sender, std::string& error);
     bool resolve_fault(PageId page_id, bool write, std::string& error);
 
     bool serve_page_request(const PageRequest& request, NodeId requester,
@@ -66,6 +71,7 @@ private:
     std::shared_ptr<PageEntry> find_region_page(RegionId region_id, uint64_t offset) const;
     bool attach_locked(const RegionDescriptor& descriptor, uint64_t first_page,
                        std::string& error);
+    bool allocate_locked(const RegionDescriptor& descriptor, std::string& error);
     bool serve_locked(const PageRequest& request, NodeId requester, PageEntry& entry,
                       PageData& response, std::unique_lock<std::mutex>& lock,
                       std::string& error);
@@ -93,12 +99,15 @@ private:
         GlobalPageControl control;
         std::vector<uint8_t> backing;
         std::shared_ptr<PendingFault> pending;
+        bool releasing = false;
+        bool retired = false;
     };
 
     MemoryManager& memory_;
     NodeId local_id_;
     PageFetcher fetcher_;
     PageInvalidator invalidator_;
+    PageReleaser releaser_;
     uint32_t timeout_ms_;
 
     // El mutex de tablas se libera antes de tomar el de una pagina.
@@ -106,6 +115,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<PageId, std::shared_ptr<PageEntry>> pages_;
     RegionTable regions_;
+    std::set<RegionId> releasing_;
+    std::map<PageId, uint64_t> free_ranges_;
     Statistics statistics_;
-    uint64_t next_free_page_ = 0;
 };

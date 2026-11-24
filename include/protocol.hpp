@@ -10,7 +10,7 @@
 #include <vector>
 
 constexpr uint32_t DSM_MAGIC = 0x44534D31u;  // "DSM1" en ASCII
-constexpr uint16_t DSM_PROTOCOL_VERSION = 4;
+constexpr uint16_t DSM_PROTOCOL_VERSION = 5;
 constexpr std::size_t DSM_HEADER_SIZE = 44;
 constexpr uint32_t DSM_MAX_PAYLOAD_SIZE = 1024u * 1024u;  // 1 MiB
 

@@ -42,7 +42,9 @@ namespace {
 }  // namespace
 
 Pager::Pager(MemoryManager& memory, NodeId local_id, uint32_t timeout_ms)
-    : memory_(memory), local_id_(local_id), timeout_ms_(timeout_ms) {}
+    : memory_(memory), local_id_(local_id), timeout_ms_(timeout_ms) {
+    if (memory_.page_count()) free_ranges_.emplace(0, memory_.page_count());
+}
 
 void Pager::set_page_fetcher(PageFetcher fetcher) {
     fetcher_ = std::move(fetcher);
@@ -50,6 +52,10 @@ void Pager::set_page_fetcher(PageFetcher fetcher) {
 
 void Pager::set_page_invalidator(PageInvalidator invalidator) {
     invalidator_ = std::move(invalidator);
+}
+
+void Pager::set_page_releaser(PageReleaser releaser) {
+    releaser_ = std::move(releaser);
 }
 
 bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error) {
@@ -70,15 +76,8 @@ bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error
     }
 
     const uint64_t rounded = round_up(size, page_size);
-    const uint64_t count = rounded / page_size;
 
     std::lock_guard<std::mutex> lock(mutex_);
-
-    const uint64_t total = memory_.page_count();
-    if (next_free_page_ > total || count > total - next_free_page_) {
-        error = "no hay espacio local para la region";
-        return false;
-    }
 
     RegionId id = 0;
     bool unique = false;
@@ -100,9 +99,7 @@ bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error
     descriptor.size = rounded;
     descriptor.page_size = static_cast<uint32_t>(page_size);
 
-    if (!attach_locked(descriptor, next_free_page_, error)) return false;
-
-    next_free_page_ += count;
+    if (!allocate_locked(descriptor, error)) return false;
     region_id = id;
     return true;
 }
@@ -125,26 +122,163 @@ bool Pager::attach_region(const RegionDescriptor& descriptor, std::string& error
         return false;
     }
 
-    const uint64_t count = descriptor.size / descriptor.page_size;
-
     std::lock_guard<std::mutex> lock(mutex_);
 
     const auto found = regions_.find(descriptor.region_id);
     if (found != regions_.end()) {
+        if (releasing_.count(descriptor.region_id)) { error = "region en liberacion"; return false; }
         if (same_descriptor(found->second.descriptor, descriptor)) return true;
         error = "RegionId en conflicto: " + std::to_string(descriptor.region_id);
         return false;
     }
 
-    const uint64_t total = memory_.page_count();
-    if (next_free_page_ > total || count > total - next_free_page_) {
-        error = "no hay espacio local para adjuntar la region";
+    return allocate_locked(descriptor, error);
+}
+
+bool Pager::allocate_locked(const RegionDescriptor& descriptor, std::string& error) {
+    const uint64_t count = descriptor.size / descriptor.page_size;
+    for (auto range = free_ranges_.begin(); range != free_ranges_.end(); ++range) {
+        if (range->second < count) continue;
+        const PageId first = range->first;
+        const uint64_t remaining = range->second - count;
+        if (!attach_locked(descriptor, first, error)) return false;
+        free_ranges_.erase(range);
+        if (remaining) free_ranges_.emplace(first + count, remaining);
+        return true;
+    }
+    error = "no hay espacio local para la region";
+    return false;
+}
+
+bool Pager::release_region(RegionId id, std::string& error) {
+    RegionInfo region;
+    std::vector<std::shared_ptr<PageEntry>> entries;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = regions_.find(id);
+        if (found == regions_.end()) { error = "region desconocida"; return false; }
+        if (!releasing_.insert(id).second) { error = "region en liberacion"; return false; }
+        region = found->second;
+        for (uint64_t i = 0; i < region.page_count; ++i) entries.push_back(pages_.at(region.first_page + i));
+    }
+    auto rollback = [&] {
+        for (const auto& entry : entries) {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            entry->releasing = false;
+            entry->retired = false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        releasing_.erase(id);
+        return false;
+    };
+    for (const auto& entry : entries) {
+        bool busy;
+        {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            busy = entry->pending != nullptr || entry->control.write_in_progress;
+            if (!busy) entry->releasing = true;
+        }
+        if (busy) { error = "region en uso"; return rollback(); }
+    }
+    for (const auto& entry : entries) {
+        bool ok = true;
+        {
+            std::unique_lock<std::mutex> lock(entry->mutex);
+            if (region.descriptor.owner_id == local_id_) {
+                if (!entry->control.sharers.empty() ||
+                    (entry->control.current_holder != 0 && entry->control.current_holder != local_id_)) {
+                    PageRequest request;
+                    request.page_id = entry->page.page_id;
+                    request.region_id = id;
+                    request.region_offset = request.page_id - region.first_page;
+                    request.access_type = 1;
+                    PageData response;
+                    ok = serve_locked(request, local_id_, *entry, response, lock, error);
+                }
+            } else {
+                auto& saved = entry->sync.writeback;
+                if (entry->page.state != MSIState::INVALID) {
+                    ok = memory_.protect_page(entry->page.page_id, PROT_READ, error);
+                    if (ok) {
+                        saved.version = entry->page.version;
+                        saved.data.resize(memory_.page_size());
+                        std::memcpy(saved.data.data(), memory_.page_address(entry->page.page_id), saved.data.size());
+                    }
+                }
+                if (ok) ok = memory_.protect_page(entry->page.page_id, PROT_NONE, error);
+                if (ok) {
+                    entry->page.state = MSIState::INVALID;
+                    entry->page.locally_present = false;
+                    PageData data = saved;
+                    data.page_id = entry->page.page_id;
+                    data.region_id = id;
+                    data.region_offset = data.page_id - region.first_page;
+                    data.state = static_cast<uint8_t>(MSIState::INVALID);
+                    data.data_size = static_cast<uint32_t>(data.data.size());
+                    if (data.data.empty()) data.version = entry->page.version;
+                    lock.unlock();
+                    if (!releaser_) { error = "no hay releaser configurado"; ok = false; }
+                    else ok = releaser_(region.descriptor.owner_id, data, error);
+                }
+            }
+        }
+        if (!ok) return rollback();
+    }
+    // Un callback que conserve la entrada antigua no puede tocar el espacio reutilizado.
+    for (const auto& entry : entries) {
+        std::lock_guard<std::mutex> lock(entry->mutex);
+        entry->retired = true;
+    }
+    if (!memory_.reset_pages(region.first_page, region.page_count, error)) return rollback();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint64_t i = 0; i < region.page_count; ++i) pages_.erase(region.first_page + i);
+    regions_.erase(id);
+    releasing_.erase(id);
+    PageId first = region.first_page;
+    uint64_t count = region.page_count;
+    auto next = free_ranges_.lower_bound(first);
+    if (next != free_ranges_.begin()) {
+        auto previous = std::prev(next);
+        if (previous->first + previous->second == first) {
+            first = previous->first;
+            count += previous->second;
+            free_ranges_.erase(previous);
+        }
+    }
+    if (next != free_ranges_.end() && first + count == next->first) {
+        count += next->second;
+        free_ranges_.erase(next);
+    }
+    free_ranges_.emplace(first, count);
+    return true;
+}
+
+bool Pager::accept_page_release(const PageData& data, NodeId sender, std::string& error) {
+    auto entry = find_region_page(data.region_id, data.region_offset);
+    if (!entry || sender == 0 || sender == local_id_ || entry->region.descriptor.owner_id != local_id_) {
+        error = "PAGE_RELEASE no corresponde al directorio";
         return false;
     }
-
-    if (!attach_locked(descriptor, next_free_page_, error)) return false;
-
-    next_free_page_ += count;
+    std::unique_lock<std::mutex> lock(entry->mutex);
+    if (!entry->ready.wait_for(lock, std::chrono::milliseconds(timeout_ms_), [&] {
+            return !entry->control.write_in_progress;
+        }) || entry->releasing || entry->retired) {
+        error = "region en uso";
+        return false;
+    }
+    auto& control = entry->control;
+    if (control.current_holder == sender) {
+        if (!data.data.empty()) {
+            if (data.data.size() != memory_.page_size() || data.version != control.version) {
+                error = "PAGE_RELEASE con write-back invalido";
+                return false;
+            }
+            entry->backing = data.data;
+        }
+        control.current_holder = 0;
+    }
+    control.sharers.erase(sender);
+    entry->page.sharers = control.sharers;
     return true;
 }
 
@@ -222,6 +356,7 @@ bool Pager::resolve_fault(PageId page_id, bool write, std::string& error) {
             return false;
         }
     }
+    if (entry->releasing || entry->retired) { error = "region liberada o en liberacion"; return false; }
     auto pending = std::make_shared<PendingFault>();
     entry->pending = pending;
     auto finish = [&](bool success) {
@@ -323,6 +458,7 @@ bool Pager::serve_page_request(const PageRequest& request, NodeId requester,
         error = "timeout esperando una transferencia de pagina";
         return false;
     }
+    if (entry->releasing || entry->retired) { error = "region liberada o en liberacion"; return false; }
     return serve_locked(request, requester, *entry, response, lock, error);
 }
 
@@ -444,6 +580,7 @@ bool Pager::invalidate_page(const InvalidateMessage& message, NodeId sender,
         return false;
     }
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->retired) { error = "region liberada"; return false; }
     const PageId page_id = entry->page.page_id;
     auto& page = entry->page;
     if (message.new_version < page.version) {
@@ -485,6 +622,7 @@ bool Pager::control_info(PageId page_id, GlobalPageControl& out) const {
     auto entry = find_page(page_id);
     if (!entry || entry->region.descriptor.owner_id != local_id_) return false;
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->retired) return false;
     out = entry->control;
     return true;
 }
@@ -503,6 +641,7 @@ bool Pager::page_info(PageId page_id, PageInfo& out) const {
     auto entry = find_page(page_id);
     if (!entry) return false;
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->retired) return false;
     out = entry->page;
     return true;
 }
@@ -517,7 +656,7 @@ std::vector<PageInfo> Pager::page_snapshot() const {
     result.reserve(entries.size());
     for (const auto& entry : entries) {
         std::lock_guard<std::mutex> lock(entry->mutex);
-        result.push_back(entry->page);
+        if (!entry->retired) result.push_back(entry->page);
     }
     return result;
 }
@@ -542,6 +681,7 @@ bool Pager::assignment(PageId page_id, PageAssignment& out) const {
     auto entry = find_page(page_id);
     if (!entry) return false;
     std::lock_guard<std::mutex> lock(entry->mutex);
+    if (entry->retired) return false;
     out.page_id = page_id;
     out.region_id = entry->page.region_id;
     out.owner_id = entry->page.owner_id;
