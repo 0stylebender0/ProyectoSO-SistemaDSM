@@ -77,7 +77,7 @@ DSMNode::DSMNode(MemoryManager& memory, NetworkManager& network, NodeId local_id
 
     network_.set_status_handler(
         [this](uint8_t flags) {
-            return status_report::sections(pager_, network_, flags);
+            return status_report::sections(pager_, network_, memory_, flags);
         });
 }
 

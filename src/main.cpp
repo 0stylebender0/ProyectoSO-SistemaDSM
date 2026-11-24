@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 
 struct CliOptions {
@@ -84,7 +85,7 @@ static bool parse_args(int argc, char** argv, CliOptions& opt) {
     return true;
 }
 
-static void print_memory(const Config& cfg, const MemoryManager& memory) {
+static void print_memory(const Config& cfg, const MemoryManager& memory, const Pager& pager) {
     std::cout << "[" << cfg.node_name << "] memoria configurada\t"
               << cfg.memory_size << " bytes / "
               << (cfg.memory_size) / (1024.0 * 1024.0) << " MB\n";
@@ -99,6 +100,10 @@ static void print_memory(const Config& cfg, const MemoryManager& memory) {
 
     std::cout << "[" << cfg.node_name << "] mmap base\t\t" << memory.base()
               << " (PROT_NONE)\n";
+    uint64_t used = 0;
+    for (const auto& region : pager.region_snapshot()) used += region.page_count;
+    std::cout << "[" << cfg.node_name << "] paginas usadas/libres\t"
+              << used << " / " << memory.page_count() - used << "\n";
 }
 
 static void print_pages(const Config& cfg, const Pager& pager) {
@@ -186,7 +191,7 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
     std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << cfg.heartbeat_port << "\n";
     std::cout << "[" << cfg.node_name << "] control\t\t\t" << cfg.control_port << "\n";
 
-    print_memory(cfg, memory);
+    print_memory(cfg, memory, pager);
     print_pages(cfg, pager);
 
     std::cout << "[" << cfg.node_name << "] bootstrap\t\t"
@@ -200,17 +205,31 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
 }
 
 static bool handle_command(const std::string& line, const Config& cfg,
-                           const MemoryManager& memory, const NetworkManager& network,
+                           const MemoryManager& memory, NetworkManager& network,
                            const Pager& pager, const CliOptions& opt) {
     const std::size_t begin = line.find_first_not_of(" \t\r");
     if (begin == std::string::npos) return true;
     const std::size_t end = line.find_last_not_of(" \t\r");
     const std::string command = line.substr(begin, end - begin + 1);
+    std::istringstream input(command);
+    std::string verb, option, extra;
+    input >> verb >> option >> extra;
 
-    if (command == "nodes") {
+    if (extra.empty() && ((verb == "nodes" && option == "--active") ||
+        ((verb == "memory" || verb == "pages" || verb == "stats") && option == "--global"))) {
+        const uint8_t flags = verb == "memory" ? STATUS_FLAG_MEMORY :
+            verb == "pages" ? STATUS_FLAG_PAGES : verb == "stats" ? STATUS_FLAG_STATS : 0;
+        std::cout << "[" << cfg.node_name << "] consultando participantes...\n" << std::flush;
+        const auto report = status_report::collect(network.nodes(), flags,
+            [&](const NodeInfo& peer, uint8_t requested, std::string& error) {
+                return network.query_status(peer, requested, error);
+            });
+        if (verb == "nodes") std::cout << "[" << cfg.node_name << "] nodos activos: " << report.responded << "\n";
+        std::cout << status_report::global(report, flags);
+    } else if (command == "nodes") {
         print_nodes(cfg, network);
     } else if (command == "memory") {
-        print_memory(cfg, memory);
+        print_memory(cfg, memory, pager);
     } else if (command == "pages") {
         print_pages(cfg, pager);
     } else if (command == "history") {
@@ -223,14 +242,15 @@ static bool handle_command(const std::string& line, const Config& cfg,
         print_info(cfg, memory, network, pager, opt);
     } else {
         std::cout << "Comando desconocido: " << command << "\n"
-                  << "Comandos: nodes, memory, pages, history, stats, info, quit\n";
+                  << "Comandos: nodes [--active], memory [--global], pages [--global], "
+                     "stats [--global], history, info, quit\n";
     }
     std::cout << std::flush;
     return true;
 }
 
 static bool run_console(const Config& cfg, const MemoryManager& memory,
-                        const NetworkManager& network, const Pager& pager,
+                        NetworkManager& network, const Pager& pager,
                         const sigset_t& signals, const CliOptions& opt) {
     const int signal_fd = signalfd(-1, &signals, SFD_CLOEXEC);
     if (signal_fd == -1) {
@@ -241,7 +261,8 @@ static bool run_console(const Config& cfg, const MemoryManager& memory,
     std::string pending;
     bool running = true;
     bool ok = true;
-    std::cout << "[" << cfg.node_name << "] comandos: nodes, memory, pages, history, stats, info, quit\n" << std::flush;
+    std::cout << "[" << cfg.node_name << "] comandos: nodes [--active], memory [--global], "
+                 "pages [--global], stats [--global], history, info, quit\n" << std::flush;
 
     while (running) {
         if (poll(inputs, 2, -1) == -1) {

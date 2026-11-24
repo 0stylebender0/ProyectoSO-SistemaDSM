@@ -70,6 +70,8 @@ public:
                       RegionDescriptor& out, std::string& error);
     bool query_regions(const NodeInfo& owner,
                        std::vector<RegionDescriptor>& out, std::string& error);
+    // Devuelve texto vacio si la consulta falla; error contiene la causa.
+    std::string query_status(const NodeInfo& node, uint8_t flags, std::string& error);
 
     uint16_t port() const { return port_; }
     NodeId node_id() const { return node_id_; }

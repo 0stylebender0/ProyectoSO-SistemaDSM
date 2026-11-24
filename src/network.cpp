@@ -766,6 +766,35 @@ bool NetworkManager::query_regions(const NodeInfo& owner,
     return ok;
 }
 
+std::string NetworkManager::query_status(const NodeInfo& node, uint8_t flags, std::string& error) {
+    error.clear();
+    if (node.id == 0 || node.tcp_port == 0 || (flags & ~STATUS_FLAG_ALL) != 0) {
+        error = "nodo o banderas STATUS invalidos";
+        return {};
+    }
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(config_.request_timeout_ms);
+    const int fd = connect_to(node.ip_address, node.tcp_port, error, deadline);
+    if (fd == -1) return {};
+    const MessageHeader request = make_header(MessageType::STATUS_REQUEST,
+        next_message_++, node_id_, node.id);
+    const std::vector<uint8_t> payload = flags ? std::vector<uint8_t>{flags} : std::vector<uint8_t>{};
+    MessageHeader response{};
+    std::vector<uint8_t> reply;
+    bool ok = send_message(fd, request, payload, error, deadline) &&
+              recv_message(fd, response, reply, error, deadline);
+    close_outgoing(fd);
+    if (ok && (response.type != static_cast<uint16_t>(MessageType::STATUS_RESPONSE) ||
+               response.message_id != request.message_id || response.sender_id != node.id ||
+               response.receiver_id != node_id_ || reply.empty())) {
+        error = "STATUS_RESPONSE invalida o consulta rechazada";
+        ok = false;
+    }
+    if (!ok) return {};
+    error.clear();
+    return std::string(reply.begin(), reply.end());
+}
+
 void NetworkManager::leave() {
     pthread_mutex_lock(&mutex_);
     const bool running = running_;

@@ -10,7 +10,7 @@
 #include <vector>
 
 constexpr uint32_t DSM_MAGIC = 0x44534D31u;  // "DSM1" en ASCII
-constexpr uint16_t DSM_PROTOCOL_VERSION = 5;
+constexpr uint16_t DSM_PROTOCOL_VERSION = 6;
 constexpr std::size_t DSM_HEADER_SIZE = 44;
 constexpr uint32_t DSM_MAX_PAYLOAD_SIZE = 1024u * 1024u;  // 1 MiB
 
@@ -56,8 +56,9 @@ enum class MessageType : uint16_t {
 constexpr uint8_t STATUS_FLAG_HISTORY = 0x01;
 constexpr uint8_t STATUS_FLAG_PAGES   = 0x02;
 constexpr uint8_t STATUS_FLAG_STATS   = 0x04;
+constexpr uint8_t STATUS_FLAG_MEMORY  = 0x08;
 constexpr uint8_t STATUS_FLAG_ALL     =
-    STATUS_FLAG_HISTORY | STATUS_FLAG_PAGES | STATUS_FLAG_STATS;
+    STATUS_FLAG_HISTORY | STATUS_FLAG_PAGES | STATUS_FLAG_STATS | STATUS_FLAG_MEMORY;
 
 enum class ErrorCode : uint16_t {
     INVALID_MESSAGE    = 1,

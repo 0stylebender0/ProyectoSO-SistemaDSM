@@ -1,6 +1,9 @@
 #include "protocol.hpp"
+#include "status_report.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -17,11 +20,13 @@ namespace {
         bool history = false;
         bool pages = false;
         bool stats = false;
+        bool memory = false;
+        bool global = false;
     };
 
     void usage(const char* program) {
         std::cerr << "Uso: " << program
-                  << " <IPv4> <puerto> [--nodes] [--history] [--pages] [--stats] [--all]\n";
+                  << " <IPv4> <puerto> [--global] [--nodes] [--memory] [--history] [--pages] [--stats] [--all]\n";
     }
 
     bool parse_options(int argc, char** argv, Options& options) {
@@ -35,11 +40,16 @@ namespace {
                 options.pages = true;
             } else if (argument == "--stats") {
                 options.stats = true;
+            } else if (argument == "--memory") {
+                options.memory = true;
+            } else if (argument == "--global") {
+                options.global = true;
             } else if (argument == "--all") {
                 options.nodes = true;
                 options.history = true;
                 options.pages = true;
                 options.stats = true;
+                options.memory = true;
             } else {
                 std::cerr << "Opcion desconocida: " << argument << "\n";
                 return false;
@@ -48,7 +58,7 @@ namespace {
         return true;
     }
 
-    int connect_to(const std::string& host, int port) {
+    int connect_to(const std::string& host, int port, IODeadline deadline) {
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_port = htons(static_cast<uint16_t>(port));
@@ -63,9 +73,32 @@ namespace {
             return -1;
         }
         const timeval timeout{5, 0};
+        const int flags = fcntl(fd, F_GETFL);
         if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1 ||
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == -1 ||
-            connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == -1) {
+            flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+            std::cerr << "Error configurando conexion: " << std::strerror(errno) << "\n";
+            close(fd);
+            return -1;
+        }
+        bool connected = connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+        if (!connected && errno == EINPROGRESS) {
+            while (true) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+                if (left <= 0) { errno = ETIMEDOUT; break; }
+                pollfd output{fd, POLLOUT, 0};
+                const int ready = poll(&output, 1, static_cast<int>(left));
+                if (ready < 0 && errno == EINTR) continue;
+                int failure = 0;
+                socklen_t length = sizeof(failure);
+                connected = ready > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &failure, &length) == 0 && failure == 0;
+                if (ready == 0) errno = ETIMEDOUT;
+                else if (failure) errno = failure;
+                break;
+            }
+        }
+        if (!connected || fcntl(fd, F_SETFL, flags) == -1) {
             std::cerr << "Error conectando: " << std::strerror(errno) << "\n";
             close(fd);
             return -1;
@@ -77,7 +110,8 @@ namespace {
                  const std::vector<uint8_t>& payload,
                  MessageType expected, MessageHeader& response,
                  std::vector<uint8_t>& reply) {
-        const int fd = connect_to(host, port);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const int fd = connect_to(host, port, deadline);
         if (fd == -1) return false;
 
         MessageHeader request_header{};
@@ -87,15 +121,16 @@ namespace {
         request_header.message_id = 1;
 
         std::string error;
-        const bool sent = send_message(fd, request_header, payload, error) &&
-                          recv_message(fd, response, reply, error);
+        const bool sent = send_message(fd, request_header, payload, error, deadline) &&
+                          recv_message(fd, response, reply, error, deadline);
         close(fd);
         if (!sent) {
             std::cerr << "Error consultando estado: " << error << "\n";
             return false;
         }
         if (response.type != static_cast<uint16_t>(expected) ||
-            response.message_id != request_header.message_id) {
+            response.message_id != request_header.message_id || response.sender_id == 0 ||
+            response.receiver_id != request_header.sender_id) {
             std::cerr << "Respuesta de estado inesperada\n";
             return false;
         }
@@ -137,6 +172,35 @@ namespace {
         }
         return true;
     }
+
+    int query_global(const std::string& host, int port, uint8_t flags) {
+        MessageHeader response{};
+        std::vector<uint8_t> reply;
+        if (!request(host, port, MessageType::NODE_LIST_REQUEST, {},
+                     MessageType::NODE_LIST_RESPONSE, response, reply)) return 1;
+        std::vector<NodeInfo> nodes;
+        std::string error;
+        if (!deserialize_nodes(reply, nodes, error) || nodes.empty()) {
+            std::cerr << "No se pudo descubrir participantes: " << error << '\n';
+            return 1;
+        }
+        std::cout << "Consultando " << nodes.size() << " participantes...\n" << std::flush;
+        const auto report = status_report::collect(nodes, flags,
+            [](const NodeInfo& node, uint8_t requested, std::string& why) -> std::string {
+                const std::vector<uint8_t> payload = requested ? std::vector<uint8_t>{requested} : std::vector<uint8_t>{};
+                MessageHeader header{};
+                std::vector<uint8_t> data;
+                if (!request(node.ip_address, node.tcp_port, MessageType::STATUS_REQUEST, payload,
+                             MessageType::STATUS_RESPONSE, header, data)) {
+                    why = "no se recibio STATUS_RESPONSE (conexion, timeout o protocolo)";
+                    return {};
+                }
+                if (header.sender_id != node.id) { why = "el nodo cambio de identificador"; return {}; }
+                return std::string(data.begin(), data.end());
+            });
+        std::cout << status_report::global(report, flags);
+        return report.partial() ? 2 : 0;
+    }
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -177,6 +241,11 @@ int main(int argc, char** argv) {
     if (options.history) flags |= STATUS_FLAG_HISTORY;
     if (options.pages) flags |= STATUS_FLAG_PAGES;
     if (options.stats) flags |= STATUS_FLAG_STATS;
+    if (options.memory) flags |= STATUS_FLAG_MEMORY;
+    if (options.global) {
+        if (!options.nodes && flags == 0) flags = STATUS_FLAG_MEMORY | STATUS_FLAG_PAGES | STATUS_FLAG_STATS;
+        return query_global(argv[1], port, flags);
+    }
 
     // Con --nodes solamente se conserva la consulta estructurada historica.
     const bool needs_status = !options.nodes || flags != 0;

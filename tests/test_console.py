@@ -115,6 +115,7 @@ try:
         config["general"]["page_size"] = "4096"
         config["network"]["bind_address"] = "127.0.0.1"
         config["discovery"]["bootstrap_nodes"] = ""
+        config["paging"]["request_timeout_ms"] = "200"
         with (directory / "dsm.conf").open("w") as file:
             config.write(file)
 
@@ -176,10 +177,31 @@ try:
         assert process.returncode == 0, log.read_text()
 
         a, a_log, a_port = start_node(directory, "A")
-        b, _, b_port = start_node(directory, "B", bootstrap=a_port)
-        c, _, c_port = start_node(directory, "C", bootstrap=a_port)
+        b, b_log, b_port = start_node(directory, "B", bootstrap=a_port)
+        c, c_log, c_port = start_node(directory, "C", bootstrap=a_port)
         wait_for(lambda: members(a_port) == members(b_port) == members(c_port)
                  and len(members(a_port)) == 3, "Los tres nodos no se descubrieron")
+
+        global_status = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(a_port), "--global"],
+            capture_output=True, text=True, timeout=3,
+        )
+        assert global_status.returncode == 0, global_status.stdout + global_status.stderr
+        for field in ("global_nodes_responded=3", "global_partial=no", "total_memory_configured=30000",
+                      "total_memory_reserved=36864", "total_memory_pages_used=0", "total_memory_pages_free=9",
+                      "total_pages_total=0", "total_page_faults=0"):
+            assert field in global_status.stdout, global_status.stdout
+        memory = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(a_port), "--memory"],
+            capture_output=True, text=True, timeout=3,
+        )
+        assert memory.returncode == 0 and "memory_configured=10000\n" in memory.stdout, memory.stdout
+        assert "memory_reserved=12288\n" in memory.stdout, memory.stdout
+        for process, log in ((a, a_log), (b, b_log), (c, c_log)):
+            process.stdin.write("nodes --active\nmemory   --global\npages --global\nstats --global\n")
+            process.stdin.flush()
+            wait_for(lambda: log.read_text().count("Consulta global: COMPLETA (3/3 nodos)") == 4,
+                     "Los comandos globales no respondieron desde todos los nodos")
 
         history = subprocess.run([str(status_binary), "127.0.0.1", str(b_port), "--history"],
                                  capture_output=True, text=True, timeout=3)
@@ -217,6 +239,34 @@ try:
                      and len(members(a_port)) == 3, "A no se reincorporo correctamente")
             assert old_id not in members(a_port), "Se recupero el registro del A anterior"
 
+        c.kill()
+        c.wait(timeout=3)
+        partial = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(a_port), "--global"],
+            capture_output=True, text=True, timeout=3,
+        )
+        assert partial.returncode == 2, partial.stdout + partial.stderr
+        for field in ("global_nodes_known=3", "global_nodes_responded=2", "global_partial=si",
+                      "No consultado: C", "total_memory_configured=20000", "total_memory_reserved=24576"):
+            assert field in partial.stdout, partial.stdout
+        assert str(c_port) in partial.stdout, partial.stdout
+        seed_down = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(c_port), "--global"],
+            capture_output=True, text=True, timeout=3,
+        )
+        assert seed_down.returncode == 1, seed_down.stdout + seed_down.stderr
+        b.send_signal(signal.SIGSTOP)
+        try:
+            os.waitpid(b.pid, os.WUNTRACED)
+            offset = a_log.stat().st_size
+            a.stdin.write("memory --global\n")
+            a.stdin.flush()
+            wait_for(lambda: "global_nodes_responded=1" in a_log.read_text()[offset:],
+                     "La consulta global no termino con un participante sin responder")
+            assert "No consultado: B" in a_log.read_text()[offset:], a_log.read_text()[offset:]
+        finally:
+            b.send_signal(signal.SIGCONT)
+
     base = demo_port()
     code, output, errors = run_demo(base)
     assert code == 0, output + errors
@@ -224,8 +274,11 @@ try:
     assert "peers=2" in output, output
     assert "history_nodes=" in output, output
     assert "Demo completada: historial A, B, C, A" in output, output
-    assert output.count("Direccion") == 6, output
-    assert output.count("memoria reservada") == 6, output
+    for field in ("global_partial=no", "total_pages_total=9", "total_pages_owned=3",
+                  "total_memory_pages_used=9", "total_pages_shared=9"):
+        assert field in output, output
+    for name in ("A", "B", "C"):
+        assert f"[{name}] memoria reservada" in output, output
     assert output.count("] detenido") == 4, output
     assert errors == "", errors
 
@@ -237,7 +290,7 @@ try:
         assert code != 0 and "Error iniciando red" in errors, output + errors
 
     assert config_path.read_bytes() == original_config, "La demo modifico dsm.conf"
-    print("test_console: OK (comandos, senales, EOF, salida y reincorporacion de A, demo)")
+    print("test_console: OK (comandos locales/globales, consulta parcial, timeout, senales, reincorporacion y demo)")
 finally:
     for process in processes:
         if process.poll() is None:

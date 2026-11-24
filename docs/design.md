@@ -1117,6 +1117,36 @@ Contrato de esta versión:
 
 ---
 
+### 9.9 Consultas locales y globales del hito 3.2
+
+La consola admite `nodes --active`, `memory --global`, `pages --global` y `stats --global`. Los comandos sin opciones conservan sus consultas locales. `nodes --active` consulta a los participantes conocidos y distingue los que responden de los que no pudieron consultarse; no elimina registros ni sustituye al heartbeat.
+
+El cliente externo descubre participantes mediante `NODE_LIST_REQUEST` y consulta a cada uno con `STATUS_REQUEST`:
+
+```sh
+./build/dsm_status 127.0.0.1 27400 --memory
+./build/dsm_status 127.0.0.1 27400 --global
+./build/dsm_status 127.0.0.1 27400 --global --memory
+./build/dsm_status 127.0.0.1 27400 --global --pages
+./build/dsm_status 127.0.0.1 27400 --global --stats
+./build/dsm_status 127.0.0.1 27400 --global --nodes
+bash scripts/demo_local.sh
+```
+
+`--global` sin otra selección muestra memoria, páginas y estadísticas. `--global --nodes` comprueba disponibilidad sin pedir esas secciones. `--all` incluye también memoria e historial. Las tablas alinean los encabezados con sus valores y convierten bytes a KB o MB usando divisores de 1024; las líneas `total_...` conservan los enteros exactos en bytes o contadores.
+
+`STATUS_FLAG_MEMORY` utiliza el bit `0x08` y solicita `memory_configured`, `memory_reserved`, `memory_pages_total`, `memory_pages_used` y `memory_pages_free`. La memoria configurada conserva el tamaño solicitado; la reservada incluye el redondeo a páginas. Las páginas usadas son las asignadas a regiones locales, propias o adjuntas, aunque estén en estado I. Las libres pueden reutilizarse para crear o adjuntar regiones. Estos valores describen la reserva virtual DSM, no el consumo físico de RAM.
+
+La agregación suma únicamente respuestas válidas y completas. Cada nodo conserva su fila y, si falla, aparece como `NO CONSULTADO`, con su nombre, identificador, dirección y causa. `global_partial=si` indica que los totales cubren solo los nodos consultados. Una respuesta con campos faltantes, repetidos o inválidos tampoco se suma. La consulta trabaja con una lista de participantes y snapshots tomados sucesivamente; no representa una instantánea atómica de todo el sistema.
+
+Los contadores globales son sumas locales. `pages_total` y `pages_shared` pueden contar varias copias de una misma página lógica. Por ejemplo, una página en S en A, B y C aporta 3 al total `pages_shared`. Los bytes enviados y recibidos se suman por separado y describen tráfico de páginas, no toda la comunicación administrativa.
+
+`NetworkManager::query_status(node, flags, error)` devuelve texto o una cadena vacía con la causa del fallo. Comparte el plazo configurado de `request_timeout_ms` entre conexión, envío y recepción, sin mantener locks durante la espera. El cliente externo usa cinco segundos por participante y realiza las consultas secuencialmente; varios participantes inaccesibles pueden acumular esos tiempos.
+
+El cliente termina con código 0 cuando obtiene una consulta completa, 2 cuando imprime resultados parciales y 1 si no logra descubrir participantes u ocurre un error de argumentos. Debe consultarse una dirección inicial disponible. Sin heartbeat, un proceso terminado con `SIGKILL` puede seguir en la tabla conocida, pero las consultas globales lo señalan como no consultado.
+
+El protocolo se actualiza a versión 6 por la nueva bandera STATUS. Todos los nodos y clientes deben recompilarse. La demo comprueba tres nodos con nueve copias locales de páginas, tres páginas propias y nueve páginas usadas. Las pruebas verifican además totales parciales al matar un nodo y timeouts ante un participante detenido.
+
 # 10. Archivo de configuración
 
 ## 10.1 Descripción

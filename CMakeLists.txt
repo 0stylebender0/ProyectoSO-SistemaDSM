@@ -18,6 +18,7 @@ add_library(dsm STATIC
     src/pager.cpp
     src/dsm_node.cpp
     src/protocol.cpp
+    src/status_report.cpp
 )
 
 target_include_directories(dsm PUBLIC include)
@@ -40,6 +41,12 @@ target_link_libraries(test_api PRIVATE dsm)
 add_test(NAME api COMMAND test_api "$<TARGET_FILE:dsm_app>")
 set_tests_properties(api PROPERTIES TIMEOUT 40)
 
+add_executable(test_global_status tests/test_global_status.cpp)
+target_compile_options(test_global_status PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_global_status PRIVATE dsm)
+add_test(NAME global_status COMMAND test_global_status)
+set_tests_properties(global_status PROPERTIES TIMEOUT 20)
+
 add_executable(test_protocol
     tests/test_protocol.cpp
     src/protocol.cpp
@@ -52,10 +59,9 @@ target_link_libraries(test_protocol PRIVATE Threads::Threads)
 
 add_test(NAME protocol COMMAND test_protocol)
 
-add_executable(dsm_status apps/status_client.cpp src/protocol.cpp src/node.cpp)
-target_include_directories(dsm_status PRIVATE include)
+add_executable(dsm_status apps/status_client.cpp)
 target_compile_options(dsm_status PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(dsm_status PRIVATE Threads::Threads)
+target_link_libraries(dsm_status PRIVATE dsm)
 
 add_executable(test_network tests/test_network.cpp src/network.cpp src/protocol.cpp src/node.cpp)
 target_include_directories(test_network PRIVATE include)

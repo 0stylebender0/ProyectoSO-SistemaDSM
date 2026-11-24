@@ -7,14 +7,43 @@
 #include "statistics.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
 
-// Formato de texto compartido por la consola local y las consultas STATUS.
-// Se mantiene en un encabezado para no duplicar la representacion entre el
-// nodo, dsm_status y las pruebas.
 namespace status_report {
+
+struct NodeReport {
+    NodeInfo node;
+    std::string text;
+    std::string error;
+    std::map<std::string, uint64_t> values;
+};
+
+struct GlobalReport {
+    std::vector<NodeReport> nodes;
+    std::map<std::string, uint64_t> totals;
+    std::size_t responded = 0;
+    bool partial() const { return responded != nodes.size(); }
+};
+
+using StatusQuery = std::function<std::string(const NodeInfo&, uint8_t, std::string&)>;
+GlobalReport collect(const std::vector<NodeInfo>& nodes, uint8_t flags, const StatusQuery& query);
+std::string global(const GlobalReport& report, uint8_t flags);
+
+inline std::string memory(const MemoryManager& memory, const Pager& pager, uint64_t configured) {
+    uint64_t used = 0;
+    for (const auto& region : pager.region_snapshot()) used += region.page_count;
+    std::ostringstream out;
+    out << "memory_configured=" << configured << "\n"
+        << "memory_reserved=" << memory.size() << "\n"
+        << "memory_pages_total=" << memory.page_count() << "\n"
+        << "memory_pages_used=" << used << "\n"
+        << "memory_pages_free=" << memory.page_count() - used << "\n";
+    return out.str();
+}
 
 inline std::string history(const std::vector<HistoryEntry>& entries) {
     std::ostringstream out;
@@ -49,6 +78,15 @@ inline std::string pages(const Pager& pager) {
 
     std::ostringstream out;
     out << "pages_total=" << entries.size() << "\n";
+    uint64_t invalid = 0, shared = 0, modified = 0;
+    for (const auto& page : entries) {
+        if (page.state == MSIState::INVALID) ++invalid;
+        if (page.state == MSIState::SHARED) ++shared;
+        if (page.state == MSIState::MODIFIED) ++modified;
+    }
+    out << "pages_state_invalid=" << invalid << "\n"
+        << "pages_state_shared=" << shared << "\n"
+        << "pages_state_modified=" << modified << "\n";
     for (const auto& page : entries) {
         out << "page=" << page.page_id
             << ",region=" << page.region_id
@@ -94,7 +132,7 @@ inline std::string statistics(const Pager& pager, const NetworkManager& network)
 }
 
 inline std::string sections(const Pager& pager, const NetworkManager& network,
-                            uint8_t flags) {
+                            const MemoryManager& manager, uint8_t flags) {
     std::string result;
     if ((flags & STATUS_FLAG_HISTORY) != 0) {
         result += history(network.history());
@@ -104,6 +142,11 @@ inline std::string sections(const Pager& pager, const NetworkManager& network,
     }
     if ((flags & STATUS_FLAG_STATS) != 0) {
         result += statistics(pager, network);
+    }
+    if ((flags & STATUS_FLAG_MEMORY) != 0) {
+        NodeInfo self;
+        network.find_node(network.node_id(), self);
+        result += memory(manager, pager, self.memory_size);
     }
     return result;
 }

@@ -136,12 +136,21 @@ for label in A1 B C; do
     assert_status "$label"
 done
 
+"$status_binary" 127.0.0.1 "$base_port" --global > "$demo_dir/global.status"
+grep -q '^global_nodes_responded=3$' "$demo_dir/global.status"
+grep -q '^global_partial=no$' "$demo_dir/global.status"
+grep -q '^total_pages_total=9$' "$demo_dir/global.status"
+grep -q '^total_pages_owned=3$' "$demo_dir/global.status"
+grep -q '^total_memory_pages_used=9$' "$demo_dir/global.status"
+printf '\nConsulta de los tres nodos\n'
+cat "$demo_dir/global.status"
+
 # Consultas administrativas desde la consola local de cada nodo.
 for label in A1 B C; do
-    printf 'info\nnodes\nmemory\npages\nhistory\nstats\n' >&"${input_fd[$label]}"
+    printf 'info\nnodes --active\nmemory --global\npages --global\nhistory\nstats --global\n' >&"${input_fd[$label]}"
 done
 for label in A1 B C; do
-    wait_for_pattern "$label" 'estadisticas' 5
+    wait_for_pattern "$label" '^total_page_faults=' 5
 done
 
 # A sale y vuelve a incorporarse con un NodeId nuevo. El historial de B debe
