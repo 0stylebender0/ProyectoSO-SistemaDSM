@@ -14,6 +14,7 @@ add_library(dsm STATIC
     src/fault_queue.cpp
     src/signal_handler.cpp
     src/network.cpp
+    src/heartbeat.cpp
     src/node.cpp
     src/pager.cpp
     src/dsm_node.cpp
@@ -47,6 +48,12 @@ target_link_libraries(test_global_status PRIVATE dsm)
 add_test(NAME global_status COMMAND test_global_status)
 set_tests_properties(global_status PROPERTIES TIMEOUT 20)
 
+add_executable(test_heartbeat tests/test_heartbeat.cpp)
+target_compile_options(test_heartbeat PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_heartbeat PRIVATE dsm)
+add_test(NAME heartbeat COMMAND test_heartbeat)
+set_tests_properties(heartbeat PROPERTIES TIMEOUT 20)
+
 add_executable(test_protocol
     tests/test_protocol.cpp
     src/protocol.cpp
@@ -63,7 +70,7 @@ add_executable(dsm_status apps/status_client.cpp)
 target_compile_options(dsm_status PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(dsm_status PRIVATE dsm)
 
-add_executable(test_network tests/test_network.cpp src/network.cpp src/protocol.cpp src/node.cpp)
+add_executable(test_network tests/test_network.cpp src/network.cpp src/heartbeat.cpp src/protocol.cpp src/node.cpp)
 target_include_directories(test_network PRIVATE include)
 target_compile_options(test_network PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_network PRIVATE Threads::Threads)
@@ -71,7 +78,7 @@ target_link_libraries(test_network PRIVATE Threads::Threads)
 add_test(NAME network COMMAND test_network)
 set_tests_properties(network PROPERTIES TIMEOUT 20)
 
-add_executable(test_membership tests/test_membership.cpp src/network.cpp src/protocol.cpp src/node.cpp)
+add_executable(test_membership tests/test_membership.cpp src/network.cpp src/heartbeat.cpp src/protocol.cpp src/node.cpp)
 target_include_directories(test_membership PRIVATE include)
 target_compile_options(test_membership PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_membership PRIVATE Threads::Threads)
@@ -104,6 +111,7 @@ set_tests_properties(pager PROPERTIES TIMEOUT 20)
 add_executable(test_page_transfer
     tests/test_page_transfer.cpp
     src/network.cpp
+    src/heartbeat.cpp
     src/protocol.cpp
     src/node.cpp
     src/pager.cpp
@@ -121,7 +129,7 @@ set_tests_properties(page_transfer PROPERTIES TIMEOUT 20)
 
 add_executable(test_msi
     tests/test_msi.cpp
-    src/network.cpp src/protocol.cpp src/node.cpp src/pager.cpp
+    src/network.cpp src/heartbeat.cpp src/protocol.cpp src/node.cpp src/pager.cpp
     src/memory_manager.cpp src/fault_queue.cpp src/signal_handler.cpp src/dsm_node.cpp
 )
 target_include_directories(test_msi PRIVATE include)
@@ -132,7 +140,7 @@ set_tests_properties(msi PROPERTIES TIMEOUT 40)
 
 add_executable(test_concurrency
     tests/test_concurrency.cpp
-    src/network.cpp src/protocol.cpp src/node.cpp src/pager.cpp
+    src/network.cpp src/heartbeat.cpp src/protocol.cpp src/node.cpp src/pager.cpp
     src/memory_manager.cpp src/fault_queue.cpp src/signal_handler.cpp src/dsm_node.cpp
 )
 target_include_directories(test_concurrency PRIVATE include)

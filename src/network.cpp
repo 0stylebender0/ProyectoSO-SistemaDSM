@@ -129,12 +129,45 @@ bool NetworkManager::start(std::string& error) {
         stop();
         return false;
     }
+
+    const uint32_t interval = config_.heartbeat_interval_ms;
+    const uint32_t timeout = config_.heartbeat_timeout_ms;
+    const uint32_t unavailable_after =
+        timeout > std::numeric_limits<uint32_t>::max() - interval
+            ? std::numeric_limits<uint32_t>::max() : timeout + interval;
+    heartbeat_ = std::make_unique<HeartbeatManager>(
+        config_.bind_address, config_.heartbeat_port, interval, timeout,
+        unavailable_after);
+    heartbeat_->set_peer_provider([this] { return node_table_.snapshot(); });
+    heartbeat_->set_transition_handler(
+        [this](const NodeInfo& node, const AvailabilityTransition& transition) {
+            switch (transition.current) {
+                case AvailabilityState::SUSPECT:
+                    history_.record(node, HistoryEvent::NODE_SUSPECT);
+                    break;
+                case AvailabilityState::UNAVAILABLE:
+                    history_.record(node, HistoryEvent::NODE_UNAVAILABLE);
+                    break;
+                case AvailabilityState::ACTIVE:
+                    history_.record(node, HistoryEvent::NODE_RECOVERED);
+                    break;
+            }
+            std::cout << "[" << config_.node_name << "] nodo " << node.node_name
+                      << ' ' << availability_state_name(transition.current)
+                      << " (heartbeat)\n" << std::flush;
+        });
+    if (!heartbeat_->start(node_id_, error)) {
+        heartbeat_.reset();
+        stop();
+        return false;
+    }
+
     NodeInfo self;
     self.id = node_id_;
     self.node_name = config_.node_name;
     self.ip_address = config_.bind_address == "0.0.0.0" ? "127.0.0.1" : config_.bind_address;
     self.tcp_port = port_;
-    self.heartbeat_port = config_.heartbeat_port;
+    self.heartbeat_port = heartbeat_->port();
     self.memory_size = config_.memory_size;
     self.page_size = config_.page_size;
     if (!node_table_.add(self, error)) {
@@ -230,6 +263,10 @@ void NetworkManager::stop() {
     }
     port_ = 0;
     node_id_ = 0;
+    if (heartbeat_) {
+        heartbeat_->stop();
+        heartbeat_.reset();
+    }
     node_table_.clear();
 }
 
@@ -324,6 +361,7 @@ bool NetworkManager::handle_connection(int fd) {
                 continue;
             }
             node_table_.remove(request.sender_id);
+            if (heartbeat_) heartbeat_->forget(request.sender_id);
             const MessageHeader response = make_header(MessageType::NODE_LEAVE_ACK,
                 request.message_id, node_id_, request.sender_id);
             if (!send_message(fd, response, {}, error)) return false;
@@ -340,6 +378,7 @@ bool NetworkManager::handle_connection(int fd) {
                 if (!send_error(fd, request, ErrorCode::INVALID_STATE, error)) return false;
             } else {
                 history_.record(announced[0], HistoryEvent::ANNOUNCE_RECEIVED);
+                if (heartbeat_) heartbeat_->observe(announced[0]);
                 if (inserted) announce(announced[0], nodes(), request.sender_id);
             }
             continue;
@@ -560,12 +599,44 @@ bool NetworkManager::find_node(NodeId id, NodeInfo& out) const {
     return node_table_.find(id, out);
 }
 
+AvailabilityState NetworkManager::availability(NodeId id) const {
+    return heartbeat_ ? heartbeat_->state(id) : AvailabilityState::ACTIVE;
+}
+
+bool NetworkManager::node_available(NodeId id) const {
+    return heartbeat_ ? heartbeat_->available(id) : true;
+}
+
+std::vector<HeartbeatSnapshot> NetworkManager::availability_snapshot() const {
+    return heartbeat_ ? heartbeat_->snapshot() : std::vector<HeartbeatSnapshot>{};
+}
+
+std::vector<NodeInfo> NetworkManager::active_nodes() const {
+    std::vector<NodeInfo> result;
+    for (const auto& node : node_table_.snapshot()) {
+        if (node.id == node_id_ || node_available(node.id)) result.push_back(node);
+    }
+    return result;
+}
+
+uint16_t NetworkManager::heartbeat_port() const {
+    return heartbeat_ ? heartbeat_->port() : config_.heartbeat_port;
+}
+
+bool NetworkManager::require_available(const NodeInfo& node, std::string& error) const {
+    if (node_available(node.id)) return true;
+    error = "nodo " + node.node_name + " (" + std::to_string(node.id) +
+            ") no disponible segun heartbeat";
+    return false;
+}
+
 bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& request,
                                 PageData& response, std::string& error) {
     if (owner.id == 0 || owner.id == node_id_) {
         error = "destino de PAGE_REQUEST invalido";
         return false;
     }
+    if (!require_available(owner, error)) return false;
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::milliseconds(config_.request_timeout_ms);
     const int fd = connect_to(owner.ip_address, owner.tcp_port, error, deadline);
@@ -604,6 +675,7 @@ bool NetworkManager::fetch_page(const NodeInfo& owner, const PageRequest& reques
 }
 
 bool NetworkManager::release_page(const NodeInfo& owner, const PageData& data, std::string& error) {
+    if (!require_available(owner, error)) return false;
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::milliseconds(config_.request_timeout_ms);
     std::vector<uint8_t> payload;
@@ -635,6 +707,7 @@ bool NetworkManager::invalidate(const NodeInfo& target, const InvalidateMessage&
         error = "destino de INVALIDATE invalido";
         return false;
     }
+    if (!require_available(target, error)) return false;
     std::vector<uint8_t> payload;
     if (!serialize_invalidate(request, payload, error)) return false;
     const auto deadline = std::chrono::steady_clock::now() +
@@ -680,6 +753,7 @@ bool NetworkManager::query_region(const NodeInfo& owner, RegionId region_id,
         error = "REGION_INFO_REQUEST requiere region_id";
         return false;
     }
+    if (!require_available(owner, error)) return false;
     const int fd = connect_to(owner.ip_address, owner.tcp_port, error);
     if (fd == -1) return false;
 
@@ -734,6 +808,7 @@ bool NetworkManager::query_regions(const NodeInfo& owner,
         error = "destino de REGION_LIST_REQUEST invalido";
         return false;
     }
+    if (!require_available(owner, error)) return false;
     const int fd = connect_to(owner.ip_address, owner.tcp_port, error);
     if (fd == -1) return false;
 
@@ -770,6 +845,10 @@ std::string NetworkManager::query_status(const NodeInfo& node, uint8_t flags, st
     error.clear();
     if (node.id == 0 || node.tcp_port == 0 || (flags & ~STATUS_FLAG_ALL) != 0) {
         error = "nodo o banderas STATUS invalidos";
+        return {};
+    }
+    if (!node_available(node.id)) {
+        error = "nodo no disponible segun heartbeat";
         return {};
     }
     const auto deadline = std::chrono::steady_clock::now() +
@@ -997,7 +1076,9 @@ bool NetworkManager::join(const std::string& bootstrap, std::string& error) {
     }
     for (const auto& node : participants) {
         history_.record(node, node.id == node_id_ ? HistoryEvent::JOIN_ACCEPTED : HistoryEvent::NODE_DISCOVERED);
+        if (heartbeat_) heartbeat_->observe(node);
     }
+    if (heartbeat_) heartbeat_->observe(bootstrap_node[0]);
     std::cout << "[" << config_.node_name << "] incorporado mediante " << bootstrap
               << ", nodos conocidos: " << nodes().size() << "\n" << std::flush;
     return true;
@@ -1023,6 +1104,7 @@ bool NetworkManager::handle_join(int fd, const MessageHeader& request,
     }
 
     history_.record(newcomer, HistoryEvent::JOIN_ACCEPTED);
+    if (heartbeat_) heartbeat_->observe(newcomer);
     const auto participants = nodes();
     std::vector<uint8_t> reply;
     MessageHeader response = make_header(MessageType::JOIN_RESPONSE,

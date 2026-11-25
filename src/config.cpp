@@ -95,8 +95,14 @@ bool validate_config(const Config& cfg, std::string& error) {
         return false;
     }
 
-    if (cfg.tcp_port == 0 || cfg.heartbeat_port == 0 || cfg.control_port == 0) {
-        error = "los puertos deben estar en el rango 1-65535";
+    if (cfg.tcp_port == 0 || cfg.control_port == 0) {
+        error = "tcp_port y control_port deben estar en el rango 1-65535";
+        return false;
+    }
+
+    // heartbeat_port=0 es valido: el SO asigna un puerto UDP efimero.
+    if (cfg.heartbeat_interval_ms == 0 || cfg.heartbeat_timeout_ms == 0) {
+        error = "heartbeat_interval_ms y heartbeat_timeout_ms deben ser mayores que 0";
         return false;
     }
 

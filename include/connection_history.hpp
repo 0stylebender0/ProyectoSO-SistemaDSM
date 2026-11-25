@@ -6,7 +6,10 @@
 #include <mutex>
 #include <vector>
 
-enum class HistoryEvent { LOCAL_START, JOIN_SENT, JOIN_ACCEPTED, NODE_DISCOVERED, ANNOUNCE_RECEIVED };
+enum class HistoryEvent {
+    LOCAL_START, JOIN_SENT, JOIN_ACCEPTED, NODE_DISCOVERED, ANNOUNCE_RECEIVED,
+    NODE_SUSPECT, NODE_UNAVAILABLE, NODE_RECOVERED
+};
 
 inline const char* history_event_name(HistoryEvent event) {
     switch (event) {
@@ -15,6 +18,9 @@ inline const char* history_event_name(HistoryEvent event) {
         case HistoryEvent::JOIN_ACCEPTED:    return "JOIN_ACCEPTED";
         case HistoryEvent::NODE_DISCOVERED:  return "NODE_DISCOVERED";
         case HistoryEvent::ANNOUNCE_RECEIVED:return "ANNOUNCE_RECEIVED";
+        case HistoryEvent::NODE_SUSPECT:     return "NODE_SUSPECT";
+        case HistoryEvent::NODE_UNAVAILABLE: return "NODE_UNAVAILABLE";
+        case HistoryEvent::NODE_RECOVERED:   return "NODE_RECOVERED";
     }
     return "DESCONOCIDO";
 }

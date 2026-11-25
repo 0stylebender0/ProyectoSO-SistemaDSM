@@ -10,7 +10,9 @@ struct Config {
 
     std::string bind_address    = "0.0.0.0";
     uint16_t    tcp_port        = 5000;
-    uint16_t    heartbeat_port  = 5001;
+    // 0 solicita un puerto UDP efimero al SO. Es util para pruebas y para
+    // varios nodos en localhost; la configuracion de produccion lo fija.
+    uint16_t    heartbeat_port  = 0;
     uint16_t    control_port    = 5002;
 
     std::string bootstrap_nodes;

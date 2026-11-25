@@ -66,6 +66,20 @@ def members(port):
             for fields in (line.split("\t") for line in response.stdout.splitlines()[1:])}
 
 
+def history_lines(port):
+    response = subprocess.run(
+        [str(status_binary), "127.0.0.1", str(port), "--history"],
+        capture_output=True, text=True, timeout=3,
+    )
+    assert response.returncode == 0, response.stderr
+    return [line for line in response.stdout.splitlines() if line.startswith("history=")]
+
+
+def has_event(port, event, name):
+    return any(f",{event}," in line and f",{name}," in line
+               for line in history_lines(port))
+
+
 def demo_port():
     for _ in range(50):
         base = free_port()
@@ -114,7 +128,10 @@ try:
         config["general"]["memory_size"] = "10000"
         config["general"]["page_size"] = "4096"
         config["network"]["bind_address"] = "127.0.0.1"
+        config["network"]["heartbeat_port"] = "0"
         config["discovery"]["bootstrap_nodes"] = ""
+        config["heartbeat"]["interval_ms"] = "100"
+        config["heartbeat"]["timeout_ms"] = "400"
         config["paging"]["request_timeout_ms"] = "200"
         with (directory / "dsm.conf").open("w") as file:
             config.write(file)
@@ -200,8 +217,10 @@ try:
         for process, log in ((a, a_log), (b, b_log), (c, c_log)):
             process.stdin.write("nodes --active\nmemory   --global\npages --global\nstats --global\n")
             process.stdin.flush()
-            wait_for(lambda: log.read_text().count("Consulta global: COMPLETA (3/3 nodos)") == 4,
+            wait_for(lambda: log.read_text().count("Consulta global: COMPLETA (3/3 nodos)") == 3,
                      "Los comandos globales no respondieron desde todos los nodos")
+            wait_for(lambda: "nodos activos: 3" in log.read_text(),
+                     "nodes --active no incluyo los tres nodos")
 
         history = subprocess.run([str(status_binary), "127.0.0.1", str(b_port), "--history"],
                                  capture_output=True, text=True, timeout=3)
@@ -241,6 +260,18 @@ try:
 
         c.kill()
         c.wait(timeout=3)
+        wait_for(lambda: has_event(a_port, "NODE_UNAVAILABLE", "C"),
+                 "A no detecto la caida de C mediante heartbeat", timeout=5)
+        offset = a_log.stat().st_size
+        a.stdin.write("nodes --active\n")
+        a.stdin.flush()
+        wait_for(lambda: "nodos activos: 2" in a_log.read_text()[offset:],
+                 "nodes --active no excluyo al nodo C no disponible")
+        offset = a_log.stat().st_size
+        a.stdin.write("nodes\n")
+        a.stdin.flush()
+        wait_for(lambda: "UNAVAILABLE" in a_log.read_text()[offset:],
+                 "nodes no mostro el estado UNAVAILABLE de C")
         partial = subprocess.run(
             [str(status_binary), "127.0.0.1", str(a_port), "--global"],
             capture_output=True, text=True, timeout=3,
@@ -258,6 +289,8 @@ try:
         b.send_signal(signal.SIGSTOP)
         try:
             os.waitpid(b.pid, os.WUNTRACED)
+            wait_for(lambda: has_event(a_port, "NODE_UNAVAILABLE", "B"),
+                     "A no detecto la pausa de B", timeout=5)
             offset = a_log.stat().st_size
             a.stdin.write("memory --global\n")
             a.stdin.flush()
@@ -266,6 +299,13 @@ try:
             assert "No consultado: B" in a_log.read_text()[offset:], a_log.read_text()[offset:]
         finally:
             b.send_signal(signal.SIGCONT)
+        wait_for(lambda: has_event(a_port, "NODE_RECOVERED", "B"),
+                 "B no volvio a ACTIVE tras reanudarse", timeout=5)
+        offset = a_log.stat().st_size
+        a.stdin.write("nodes --active\n")
+        a.stdin.flush()
+        wait_for(lambda: "nodos activos: 2" in a_log.read_text()[offset:],
+                 "nodes --active no recupero a B")
 
     base = demo_port()
     code, output, errors = run_demo(base)

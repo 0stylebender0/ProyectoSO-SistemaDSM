@@ -18,6 +18,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -146,26 +147,64 @@ static void print_pages(const Config& cfg, const Pager& pager) {
     }
 }
 
-static void print_nodes(const Config& cfg, const NetworkManager& network) {
-    const auto nodes = network.nodes();
-    std::size_t name_width = std::string("Nombre").size();
-    std::size_t address_width = std::string("Direccion").size();
-    for (const auto& node : nodes) {
-        const std::string address = node.ip_address + ":" + std::to_string(node.tcp_port);
-        if (node.node_name.size() > name_width) name_width = node.node_name.size();
-        if (address.size() > address_width) address_width = address.size();
+static void print_nodes(const Config& cfg, const NetworkManager& network,
+                        bool active_only = false) {
+    const auto nodes = active_only ? network.active_nodes() : network.nodes();
+    std::map<NodeId, HeartbeatSnapshot> heartbeats;
+    for (const auto& item : network.availability_snapshot()) {
+        heartbeats[item.node_id] = item;
     }
 
-    std::cout << "[" << cfg.node_name << "] nodos conocidos: " << nodes.size() << "\n"
+    std::size_t name_width = std::string("Nombre").size();
+    std::size_t address_width = std::string("Direccion").size();
+    std::size_t state_width = std::string("Estado").size();
+    std::size_t last_width = std::string("Ultimo").size();
+    for (const auto& node : nodes) {
+        const std::string address = node.ip_address + ":" + std::to_string(node.tcp_port);
+        const AvailabilityState state = node.id == network.node_id()
+            ? AvailabilityState::ACTIVE : network.availability(node.id);
+        const std::string last = node.id == network.node_id() ? "local" : "sin heartbeat";
+        if (node.node_name.size() > name_width) name_width = node.node_name.size();
+        if (address.size() > address_width) address_width = address.size();
+        if (std::strlen(availability_state_name(state)) > state_width) {
+            state_width = std::strlen(availability_state_name(state));
+        }
+        if (last.size() > last_width) last_width = last.size();
+    }
+    // Las edades se calculan antes de imprimir para mantener alineadas las filas.
+    std::map<NodeId, std::string> last_seen;
+    for (const auto& node : nodes) {
+        if (node.id == network.node_id()) {
+            last_seen[node.id] = "local";
+        } else {
+            const auto found = heartbeats.find(node.id);
+            if (found != heartbeats.end() && found->second.has_heartbeat) {
+                last_seen[node.id] = "hace " + std::to_string(found->second.age_ms) + " ms";
+                last_width = std::max(last_width, last_seen[node.id].size());
+            } else {
+                last_seen[node.id] = "sin heartbeat";
+            }
+        }
+    }
+
+    std::cout << "[" << cfg.node_name << "] "
+              << (active_only ? "nodos activos: " : "nodos conocidos: ")
+              << nodes.size() << "\n"
               << std::right << std::setw(20) << "ID" << "  "
               << std::left << std::setw(static_cast<int>(name_width)) << "Nombre" << "  "
               << std::setw(static_cast<int>(address_width)) << "Direccion" << "  "
+              << std::setw(static_cast<int>(state_width)) << "Estado" << "  "
+              << std::setw(static_cast<int>(last_width)) << "Ultimo" << "  "
               << "Memoria\n";
     for (const auto& node : nodes) {
         const std::string address = node.ip_address + ":" + std::to_string(node.tcp_port);
+        const AvailabilityState state = node.id == network.node_id()
+            ? AvailabilityState::ACTIVE : network.availability(node.id);
         std::cout << std::right << std::setw(20) << node.id << "  "
                   << std::left << std::setw(static_cast<int>(name_width)) << node.node_name << "  "
                   << std::setw(static_cast<int>(address_width)) << address << "  "
+                  << std::setw(static_cast<int>(state_width)) << availability_state_name(state) << "  "
+                  << std::setw(static_cast<int>(last_width)) << last_seen[node.id] << "  "
                   << node.memory_size << " bytes / "
                   << node.memory_size / (1024.0 * 1024.0) << " MB\n";
     }
@@ -188,7 +227,7 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
     std::cout << "[" << cfg.node_name << "] node id\t\t\t" << network.node_id() << "\n";
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
     std::cout << "[" << cfg.node_name << "] tcp\t\t\t" << cfg.tcp_port << "\n";
-    std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << cfg.heartbeat_port << "\n";
+    std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << network.heartbeat_port() << "\n";
     std::cout << "[" << cfg.node_name << "] control\t\t\t" << cfg.control_port << "\n";
 
     print_memory(cfg, memory, pager);
@@ -215,16 +254,18 @@ static bool handle_command(const std::string& line, const Config& cfg,
     std::string verb, option, extra;
     input >> verb >> option >> extra;
 
-    if (extra.empty() && ((verb == "nodes" && option == "--active") ||
-        ((verb == "memory" || verb == "pages" || verb == "stats") && option == "--global"))) {
+    if (extra.empty() && verb == "nodes" && option == "--active") {
+        print_nodes(cfg, network, true);
+    } else if (extra.empty() &&
+               ((verb == "memory" || verb == "pages" || verb == "stats") &&
+                option == "--global")) {
         const uint8_t flags = verb == "memory" ? STATUS_FLAG_MEMORY :
-            verb == "pages" ? STATUS_FLAG_PAGES : verb == "stats" ? STATUS_FLAG_STATS : 0;
+            verb == "pages" ? STATUS_FLAG_PAGES : STATUS_FLAG_STATS;
         std::cout << "[" << cfg.node_name << "] consultando participantes...\n" << std::flush;
         const auto report = status_report::collect(network.nodes(), flags,
             [&](const NodeInfo& peer, uint8_t requested, std::string& error) {
                 return network.query_status(peer, requested, error);
             });
-        if (verb == "nodes") std::cout << "[" << cfg.node_name << "] nodos activos: " << report.responded << "\n";
         std::cout << status_report::global(report, flags);
     } else if (command == "nodes") {
         print_nodes(cfg, network);

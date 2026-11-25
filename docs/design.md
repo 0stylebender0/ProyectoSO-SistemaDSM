@@ -1119,7 +1119,7 @@ Contrato de esta versión:
 
 ### 9.9 Consultas locales y globales del hito 3.2
 
-La consola admite `nodes --active`, `memory --global`, `pages --global` y `stats --global`. Los comandos sin opciones conservan sus consultas locales. `nodes --active` consulta a los participantes conocidos y distingue los que responden de los que no pudieron consultarse; no elimina registros ni sustituye al heartbeat.
+La consola admite `nodes --active`, `memory --global`, `pages --global` y `stats --global`. Los comandos sin opciones conservan sus consultas locales. Desde el hito 3.3, `nodes --active` filtra la tabla local de disponibilidad mantenida por el heartbeat y no realiza consultas TCP; `nodes` muestra además el estado `ACTIVE`/`SUSPECT`/`UNAVAILABLE` y la antigüedad del último heartbeat.
 
 El cliente externo descubre participantes mediante `NODE_LIST_REQUEST` y consulta a cada uno con `STATUS_REQUEST`:
 
@@ -1143,7 +1143,9 @@ Los contadores globales son sumas locales. `pages_total` y `pages_shared` pueden
 
 `NetworkManager::query_status(node, flags, error)` devuelve texto o una cadena vacía con la causa del fallo. Comparte el plazo configurado de `request_timeout_ms` entre conexión, envío y recepción, sin mantener locks durante la espera. El cliente externo usa cinco segundos por participante y realiza las consultas secuencialmente; varios participantes inaccesibles pueden acumular esos tiempos.
 
-El cliente termina con código 0 cuando obtiene una consulta completa, 2 cuando imprime resultados parciales y 1 si no logra descubrir participantes u ocurre un error de argumentos. Debe consultarse una dirección inicial disponible. Sin heartbeat, un proceso terminado con `SIGKILL` puede seguir en la tabla conocida, pero las consultas globales lo señalan como no consultado.
+El cliente termina con código 0 cuando obtiene una consulta completa, 2 cuando imprime resultados parciales y 1 si no logra descubrir participantes u ocurre un error de argumentos. Debe consultarse una dirección inicial disponible.
+
+Con el heartbeat del hito 3.3, un proceso terminado con `SIGKILL` se marca `UNAVAILABLE` cuando vence `heartbeat_timeout_ms` más un intervalo de verificación. Las consultas globales conservan su fila para informar la caída, pero no abren una conexión TCP: `query_status` falla de inmediato con la causa del heartbeat. Los nodos desconocidos y los que están en `SUSPECT` todavía se consideran disponibles.
 
 El protocolo se actualiza a versión 6 por la nueva bandera STATUS. Todos los nodos y clientes deben recompilarse. La demo comprueba tres nodos con nueve copias locales de páginas, tres páginas propias y nueve páginas usadas. Las pruebas verifican además totales parciales al matar un nodo y timeouts ante un participante detenido.
 
@@ -1169,9 +1171,9 @@ page_size=4096
 
 [network]
 bind_address=0.0.0.0
-tcp_port=5000
-heartbeat_port=5001
-control_port=5002
+tcp_port=27400
+heartbeat_port=27401
+control_port=27402
 
 [discovery]
 bootstrap_nodes=
@@ -1198,7 +1200,7 @@ request_timeout_ms=5000
 | page_size | uint32_t | 4096 | Tamaño de página en bytes. |
 | bind_address | string | 0.0.0.0 | Dirección donde se escucharán conexiones. |
 | tcp_port | uint16_t | 5000 | Puerto principal TCP. |
-| heartbeat_port | uint16_t | 5001 | Puerto UDP de heartbeat. |
+| heartbeat_port | uint16_t | 0 o 27401 | Puerto UDP de heartbeat. `0` solicita un puerto efímero; la configuración de producción usa 27401. |
 | control_port | uint16_t | 5002 | Puerto reservado para control, si se utiliza un canal separado. |
 | bootstrap_nodes | list | Vacío | Nodos iniciales conocidos. |
 | interval_ms | uint32_t | 1000 | Intervalo entre heartbeats. |
@@ -1551,3 +1553,167 @@ la memoria.
 
 La coherencia de páginas no hace atómicas operaciones como `x = x + 1`.
 La aplicación debe proteger esas operaciones compuestas entre sus propios hilos.
+
+---
+
+# 18. Heartbeat y disponibilidad (hito 3.3)
+
+## 18.1 Objetivo y alcance
+
+El heartbeat informa periódicamente que cada participante continúa vivo y permite
+marcarlo como sospechoso o no disponible cuando deja de responder. Se implementa
+en `include/heartbeat.hpp` y `src/heartbeat.cpp`, y `NetworkManager` lo inicia y
+detiene junto con la red TCP.
+
+La disponibilidad es informativa y se mantiene separada de `NodeInfo` y de la
+tabla de nodos. Un nodo puede seguir en la tabla conocida después de una caída;
+el estado de disponibilidad es el que bloquea nuevas operaciones. Los nodos
+desconocidos y los que están en `SUSPECT` se consideran disponibles para no
+interrumpir el sistema por una pérdida aislada de datagramas.
+
+## 18.2 Paquete UDP
+
+Se envía un datagrama UDP con el payload binario de 20 bytes de la sección 7.8,
+sin el framing de 44 bytes usado por TCP:
+
+| Campo | Tipo | Desplazamiento |
+|---|---|---:|
+| `node_id` | uint64_t | 0 |
+| `timestamp` | uint64_t | 8 |
+| `sequence_number` | uint32_t | 16 |
+
+Todos los enteros se serializan en orden de bytes de red. `timestamp` es la hora
+del emisor en milisegundos y `sequence_number` aumenta en cada ronda de envío;
+el receptor conserva el último número observado para identificar duplicados o
+mensajes desordenados. Un datagrama de tamaño distinto o con `node_id=0` se
+descarta.
+
+`serialize_heartbeat` y `deserialize_heartbeat` viven en `protocol.cpp` y se
+prueban de forma independiente del socket.
+
+## 18.3 Socket, hilo y puerto efímero
+
+Cada nodo abre un socket `SOCK_DGRAM` en `bind_address:heartbeat_port`. El valor
+`heartbeat_port=0` solicita al sistema operativo un puerto efímero; el puerto real
+se obtiene con `getsockname` y se publica en el `NodeInfo` local antes de
+incorporarse a la tabla. Esto permite ejecutar varios nodos en localhost sin
+compartir el mismo puerto UDP y se usa en las pruebas automáticas. La
+configuración de producción conserva un puerto explícito (27401 en
+`config/dsm.conf`).
+
+Un solo hilo atiende el socket. En cada iteración:
+
+1. Llama a un `PeerProvider` que devuelve la tabla de nodos actual; los nodos
+   nuevos se registran con su `ip_address:heartbeat_port`.
+2. Si venció el intervalo, envía el mismo datagrama a todos los pares conocidos.
+3. Drena los datagramas pendientes y actualiza `last_seen`, secuencia y estado.
+4. Revisa las edades y aplica transiciones de disponibilidad.
+
+El hilo usa `poll` con esperas de hasta 50 ms para no retrasar la detección ni el
+apagado. `observe` también se invoca al aceptar una incorporación o un anuncio, y
+`forget` al recibir `NODE_LEAVE`, para no esperar al siguiente ciclo.
+
+## 18.4 Estados y umbrales
+
+```cpp
+enum class AvailabilityState : uint8_t {
+    ACTIVE      = 0,
+    SUSPECT     = 1,
+    UNAVAILABLE = 2,
+};
+```
+
+Con `heartbeat_interval_ms` y `heartbeat_timeout_ms` de la configuración:
+
+- `ACTIVE`: se recibió un heartbeat dentro del timeout.
+- `SUSPECT`: pasó `heartbeat_timeout_ms` sin heartbeat.
+- `UNAVAILABLE`: pasó `heartbeat_timeout_ms + heartbeat_interval_ms` sin
+  heartbeat; se añade un intervalo como verificación adicional.
+- `ACTIVE` de nuevo: cualquier heartbeat válido recupera al nodo.
+
+El temporizador usa `std::chrono::steady_clock`, por lo que no depende de la
+hora del sistema ni de los relojes de otras máquinas. La tabla guarda `last_seen`,
+la última secuencia, si se recibió al menos un heartbeat y el estado actual.
+
+`HeartbeatManager` expone `state`, `available`, `snapshot`, `active_snapshot` y
+`active_count`. `NetworkManager` los envuelve con `availability`,
+`node_available`, `availability_snapshot`, `active_nodes` y `heartbeat_port`.
+
+## 18.5 Historial y consola
+
+Cada transición se registra en `ConnectionHistory` con los eventos:
+
+| Evento | Transición |
+|---|---|
+| `NODE_SUSPECT` | `ACTIVE` → `SUSPECT` |
+| `NODE_UNAVAILABLE` | `SUSPECT` (o `ACTIVE`) → `UNAVAILABLE` |
+| `NODE_RECOVERED` | `SUSPECT`/`UNAVAILABLE` → `ACTIVE` |
+
+El historial conserva el `NodeInfo` del participante, por lo que la caída y la
+recuperación se ven con `dsm_status <ip> <puerto> --history` y con el comando
+`history` de la consola.
+
+La consola muestra en `nodes` las columnas `Estado` y `Ultimo`:
+
+- `ACTIVE`, `SUSPECT` o `UNAVAILABLE`;
+- `hace N ms` desde el último heartbeat, `sin heartbeat` si todavía no llegó, o
+  `local` para el propio nodo.
+
+`nodes --active` usa la tabla local de disponibilidad y excluye únicamente los
+nodos `UNAVAILABLE`. No abre conexiones TCP ni modifica la tabla de nodos. Las
+consultas `memory --global`, `pages --global` y `stats --global` mantienen la
+agregación del hito 3.2: un nodo no disponible aparece como `NO CONSULTADO` y no
+se suma a los totales, pero su fila se conserva para explicar el resultado
+parcial.
+
+## 18.6 Fallo rápido de operaciones
+
+Antes de abrir una conexión, `fetch_page`, `release_page`, `invalidate`,
+`query_region`, `query_regions` y `query_status` consultan la disponibilidad del
+destino. Si está `UNAVAILABLE`, devuelven error de inmediato con la causa
+`no disponible segun heartbeat`, sin esperar el timeout TCP. Esto evita que una
+consulta global o un fallo de página queden bloqueados por un nodo que el
+heartbeat ya declaró caído.
+
+La incorporación, el anuncio y la salida usan TCP directamente y no se bloquean
+por el estado de disponibilidad: un nodo que vuelve debe poder reincorporarse y
+recuperarse.
+
+## 18.7 Pruebas y aceptación
+
+`tests/test_heartbeat.cpp` verifica:
+
+- serialización de exactamente 20 bytes y rechazo de tamaños inválidos;
+- puerto efímero con `heartbeat_port=0`;
+- recepción de heartbeats entre dos gestores;
+- transición `ACTIVE` → `SUSPECT` → `UNAVAILABLE` al detener un emisor;
+- recuperación a `ACTIVE` al reiniciar el emisor con el mismo `NodeId` y puerto;
+- olvido de un nodo con `forget`.
+
+`tests/test_console.py` verifica con procesos reales:
+
+- `nodes --active` local con los tres nodos;
+- `SIGKILL` de C detectado como `NODE_UNAVAILABLE` y excluido de
+  `nodes --active`;
+- consulta global parcial con C marcado como `NO CONSULTADO`;
+- `SIGSTOP`/`SIGCONT` de B: caída detectada, consulta con un solo participante y
+  recuperación con `NODE_RECOVERED`.
+
+La suite completa se ejecuta con:
+
+```sh
+cmake -B build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+## 18.8 Limitaciones
+
+- La disponibilidad no elimina automáticamente al nodo de la tabla; una
+  reincorporación con un `NodeId` nuevo se agrega como un participante distinto.
+- El heartbeat no recupera páginas ni regiones de un dueño caído. Esa sigue
+  siendo una limitación documentada de esta entrega.
+- La detección depende de que el tráfico UDP llegue. En redes con filtrado de
+  puertos hay que abrir el rango TCP y el puerto UDP configurado.
+- La tabla de disponibilidad es local a cada nodo; no se replica ni se somete a
+  consenso.

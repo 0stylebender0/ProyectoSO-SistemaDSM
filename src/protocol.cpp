@@ -656,3 +656,34 @@ bool deserialize_invalidate(const std::vector<uint8_t>& data,
     out = message;
     return true;
 }
+
+bool serialize_heartbeat(const HeartbeatMessage& message,
+                         std::vector<uint8_t>& out, std::string& error) {
+    if (message.node_id == 0) {
+        error = "HEARTBEAT sin node_id";
+        return false;
+    }
+    out.resize(DSM_HEARTBEAT_SIZE);
+    write_u64(out.data(), message.node_id);
+    write_u64(out.data() + 8, message.timestamp);
+    write_u32(out.data() + 16, message.sequence_number);
+    return true;
+}
+
+bool deserialize_heartbeat(const std::vector<uint8_t>& data,
+                           HeartbeatMessage& out, std::string& error) {
+    if (data.size() != DSM_HEARTBEAT_SIZE) {
+        error = "HEARTBEAT debe tener 20 bytes";
+        return false;
+    }
+    HeartbeatMessage message;
+    message.node_id = read_u64(data.data());
+    message.timestamp = read_u64(data.data() + 8);
+    message.sequence_number = read_u32(data.data() + 16);
+    if (message.node_id == 0) {
+        error = "HEARTBEAT sin node_id";
+        return false;
+    }
+    out = message;
+    return true;
+}

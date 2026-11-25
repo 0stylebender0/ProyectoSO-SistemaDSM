@@ -2,6 +2,7 @@
 
 #include "config.hpp"
 #include "connection_history.hpp"
+#include "heartbeat.hpp"
 #include "node.hpp"
 #include "protocol.hpp"
 #include "statistics.hpp"
@@ -9,6 +10,7 @@
 #include <pthread.h>
 
 #include <functional>
+#include <memory>
 #include <queue>
 #include <atomic>
 #include <set>
@@ -73,6 +75,14 @@ public:
     // Devuelve texto vacio si la consulta falla; error contiene la causa.
     std::string query_status(const NodeInfo& node, uint8_t flags, std::string& error);
 
+    // Disponibilidad observada por el heartbeat. Un nodo desconocido se
+    // considera disponible; solo UNAVAILABLE bloquea nuevas operaciones.
+    AvailabilityState availability(NodeId id) const;
+    bool node_available(NodeId id) const;
+    std::vector<HeartbeatSnapshot> availability_snapshot() const;
+    std::vector<NodeInfo> active_nodes() const;
+    uint16_t heartbeat_port() const;
+
     uint16_t port() const { return port_; }
     NodeId node_id() const { return node_id_; }
     std::vector<NodeInfo> nodes() const { return node_table_.snapshot(); }
@@ -97,6 +107,7 @@ private:
                    IODeadline deadline = IODeadline::max());
     void close_outgoing(int fd);
     NodeInfo local_node() const;
+    bool require_available(const NodeInfo& node, std::string& error) const;
 
     Config config_;
     int listen_fd_ = -1;
@@ -105,6 +116,7 @@ private:
     NodeId node_id_ = 0;
     NodeTable node_table_;
     ConnectionHistory history_;
+    std::unique_ptr<HeartbeatManager> heartbeat_;
     PageRequestHandler page_request_handler_;
     RegionInfoHandler region_info_handler_;
     InvalidationHandler invalidation_handler_;

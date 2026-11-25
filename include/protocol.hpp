@@ -115,6 +115,15 @@ struct RegionInfoResponse {
     uint32_t page_size = 0;
 };
 
+// Paquete UDP compacto de la seccion 7.8. No usa el framing TCP.
+struct HeartbeatMessage {
+    uint64_t node_id = 0;
+    uint64_t timestamp = 0;
+    uint32_t sequence_number = 0;
+};
+
+constexpr std::size_t DSM_HEARTBEAT_SIZE = 20;
+
 using IODeadline = std::chrono::steady_clock::time_point;
 
 std::array<uint8_t, DSM_HEADER_SIZE> serialize_header(const MessageHeader& header);
@@ -181,3 +190,8 @@ bool serialize_invalidate(const InvalidateMessage& message,
                           std::vector<uint8_t>& out, std::string& error);
 bool deserialize_invalidate(const std::vector<uint8_t>& data,
                             InvalidateMessage& out, std::string& error);
+
+bool serialize_heartbeat(const HeartbeatMessage& message,
+                         std::vector<uint8_t>& out, std::string& error);
+bool deserialize_heartbeat(const std::vector<uint8_t>& data,
+                           HeartbeatMessage& out, std::string& error);
