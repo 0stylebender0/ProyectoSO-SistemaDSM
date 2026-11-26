@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -65,10 +66,105 @@ namespace {
         }
         return false;
     }
+
+    void manager_edges() {
+        std::string error;
+        HeartbeatManager invalid("127.0.0.1", 0, 20, 60, 120);
+        require(!invalid.start(0, error), "heartbeat necesita un node_id distinto de cero");
+
+        HeartbeatManager bad_bind("no-es-una-ip", 0, 20, 60, 120);
+        require(!bad_bind.start(7, error), "rechazar bind_address invalido");
+
+        HeartbeatManager manager("127.0.0.1", 0, 20, 60, 120);
+        require(manager.start(77, error), error);
+        const uint16_t port = manager.port();
+        require(port != 0, "puerto efimero del gestor");
+        require(!manager.start(77, error), "rechazar doble start");
+        require(manager.port() == port, "doble start conserva el puerto");
+        manager.stop();
+        require(manager.port() == 0, "stop libera el puerto");
+        manager.stop();
+        require(manager.start(78, error), error);
+        require(manager.port() != 0, "reiniciar el gestor");
+        manager.stop();
+    }
+
+    void malformed_datagrams() {
+        std::string error;
+        HeartbeatManager manager("127.0.0.1", 0, 20, 5000, 10000);
+        require(manager.start(500, error), error);
+
+        const NodeId known_id = 501;
+        const NodeId unknown_id = 502;
+        const NodeInfo known = make_node(known_id, "known", free_udp_port());
+        manager.observe(known);
+        require(manager.snapshot().size() == 1 &&
+                !has_heartbeat(manager, known_id) &&
+                manager.state(known_id) == AvailabilityState::ACTIVE,
+                "el par observado empieza ACTIVE sin heartbeat");
+
+        const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        require(fd != -1, "socket UDP emisor");
+        sockaddr_in destination{};
+        destination.sin_family = AF_INET;
+        destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        destination.sin_port = htons(manager.port());
+        auto send = [&](const std::vector<uint8_t>& data) {
+            const ssize_t count = sendto(fd, data.data(), data.size(), 0,
+                reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
+            require(count == static_cast<ssize_t>(data.size()), "enviar datagrama de prueba");
+        };
+
+        for (std::size_t size : {std::size_t{1}, std::size_t{18}, std::size_t{19},
+                                 std::size_t{21}, std::size_t{64}, std::size_t{65}}) {
+            send(std::vector<uint8_t>(size, 0));
+        }
+        send(std::vector<uint8_t>(DSM_HEARTBEAT_SIZE, 0));
+
+        HeartbeatMessage unknown;
+        unknown.node_id = unknown_id;
+        unknown.timestamp = 1;
+        unknown.sequence_number = 1;
+        std::vector<uint8_t> bytes;
+        require(serialize_heartbeat(unknown, bytes, error), error);
+        send(bytes);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        auto snapshot = manager.snapshot();
+        require(snapshot.size() == 1, "un nodo desconocido no se agrega a la tabla");
+        require(!has_heartbeat(manager, known_id) &&
+                manager.state(known_id) == AvailabilityState::ACTIVE,
+                "los datagramas malformados se descartan");
+        require(manager.active_count() == 1, "el par conocido sigue activo");
+
+        HeartbeatMessage valid;
+        valid.node_id = known_id;
+        valid.timestamp = 999;
+        valid.sequence_number = 7;
+        require(serialize_heartbeat(valid, bytes, error), error);
+        send(bytes);
+        require(wait_for([&] { return has_heartbeat(manager, known_id); }, 2000),
+                "un heartbeat valido se acepta despues de los malformados");
+
+        bool sequence_ok = false;
+        for (const auto& item : manager.snapshot()) {
+            if (item.node_id == known_id) {
+                sequence_ok = item.last_sequence == 7 && item.state == AvailabilityState::ACTIVE;
+            }
+        }
+        require(sequence_ok, "conservar la secuencia del heartbeat valido");
+
+        send(std::vector<uint8_t>(19, 0));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        require(has_heartbeat(manager, known_id), "un malformado posterior no borra el estado");
+
+        close(fd);
+        manager.stop();
+    }
 }
 
 int main() {
-    alarm(20);
+    alarm(25);
 
     HeartbeatMessage message;
     message.node_id = 12345;
@@ -84,8 +180,31 @@ int main() {
             decoded.sequence_number == message.sequence_number, "roundtrip de heartbeat");
     require(!deserialize_heartbeat(std::vector<uint8_t>(19), decoded, error),
             "rechazar heartbeat de tamano invalido");
+    for (std::size_t size : {std::size_t{0}, std::size_t{1}, std::size_t{18},
+                             std::size_t{21}, std::size_t{64}}) {
+        require(!deserialize_heartbeat(std::vector<uint8_t>(size), decoded, error),
+                "rechazar heartbeat con tamano " + std::to_string(size));
+    }
+    std::vector<uint8_t> zero_id(DSM_HEARTBEAT_SIZE, 0);
+    require(!deserialize_heartbeat(zero_id, decoded, error),
+            "rechazar heartbeat con node_id cero");
     require(!serialize_heartbeat(HeartbeatMessage{}, bytes, error),
             "rechazar heartbeat sin node_id");
+    HeartbeatMessage limits;
+    limits.node_id = std::numeric_limits<uint64_t>::max();
+    limits.timestamp = std::numeric_limits<uint64_t>::max();
+    limits.sequence_number = std::numeric_limits<uint32_t>::max();
+    require(serialize_heartbeat(limits, bytes, error) && bytes.size() == DSM_HEARTBEAT_SIZE,
+            "serializar los limites del heartbeat");
+    require(deserialize_heartbeat(bytes, decoded, error) &&
+            decoded.node_id == limits.node_id && decoded.timestamp == limits.timestamp &&
+            decoded.sequence_number == limits.sequence_number,
+            "roundtrip de los limites del heartbeat");
+    require(bytes[0] == 0xFF && bytes[7] == 0xFF && bytes[16] == 0xFF && bytes[19] == 0xFF,
+            "heartbeat en orden de bytes de red");
+
+    manager_edges();
+    malformed_datagrams();
 
     HeartbeatManager ephemeral("127.0.0.1", 0, 50, 150, 300);
     require(ephemeral.start(303, error), error);
@@ -164,6 +283,6 @@ int main() {
 
     hb_b2.stop();
     hb_a.stop();
-    std::cout << "test_heartbeat: OK (20 bytes, efimero, SUSPECT, UNAVAILABLE, recuperacion y olvido)\n";
+    std::cout << "test_heartbeat: OK (20 bytes, efimero, limites, malformados, SUSPECT, UNAVAILABLE, recuperacion y olvido)\n";
     return 0;
 }

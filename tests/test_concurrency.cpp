@@ -11,7 +11,10 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace {
     using namespace std::chrono_literals;
@@ -382,8 +385,115 @@ namespace {
         sender.join(); close(fds[0]); close(fds[1]);
     }
 
-    void missing_invalidation_ack() {
-        Config config = configuration(1);
+    void multi_page_stress() {
+        const uint32_t page = page_size();
+        Config config = configuration(4);
+        config.memory_size = static_cast<uint64_t>(page) * 16;
+        config.request_timeout_ms = 3000;
+
+        MemoryManager a_memory(config.memory_size, config.page_size);
+        MemoryManager b_memory(config.memory_size, config.page_size);
+        std::string error;
+        require(a_memory.reserve(error) && b_memory.reserve(error), error);
+
+        NetworkManager a_network(config, 666);
+        DSMNode a(a_memory, a_network, 666);
+        require(a_network.start(error), error);
+        config.bootstrap_nodes = "127.0.0.1:" + std::to_string(a_network.port());
+        NetworkManager b_network(config, 777);
+        DSMNode b(b_memory, b_network, 777);
+        require(b_network.start(error), error);
+
+        constexpr unsigned pages = 8;
+        RegionId region = 0;
+        require(a.create_region(static_cast<uint64_t>(page) * pages, region, error), error);
+        RegionInfo a_info;
+        require(a.pager().region_info(region, a_info), "region del dueno");
+        for (unsigned i = 0; i < pages; ++i) {
+            require(a.resolve_fault(a_info.first_page + i, true, error), error);
+            *static_cast<volatile uint64_t*>(a_memory.page_address(a_info.first_page + i)) = 100 + i;
+        }
+
+        require(b.attach_region_from(666, region, error), error);
+        RegionInfo b_info;
+        require(b.pager().region_info(region, b_info), "copia remota");
+        std::mutex error_mutex;
+        std::string first_error;
+        std::atomic<unsigned> failures{0};
+        auto fail = [&](const std::string& why) {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (first_error.empty()) first_error = why;
+            ++failures;
+        };
+
+        std::vector<std::thread> readers;
+        for (unsigned i = 0; i < pages; ++i) {
+            readers.emplace_back([&, i] {
+                std::string why;
+                if (!b.resolve_fault(b_info.first_page + i, false, why)) {
+                    fail("lectura remota: " + why);
+                    return;
+                }
+                if (*static_cast<volatile uint64_t*>(
+                        b_memory.page_address(b_info.first_page + i)) != 100 + i) {
+                    fail("contenido remoto inesperado en la pagina " + std::to_string(i));
+                }
+            });
+        }
+        for (auto& reader : readers) reader.join();
+        require(failures.load() == 0, first_error);
+
+        std::vector<std::thread> writers;
+        for (unsigned i = 0; i < pages; ++i) {
+            writers.emplace_back([&, i] {
+                std::string why;
+                if (!b.resolve_fault(b_info.first_page + i, true, why)) {
+                    fail("escritura remota: " + why);
+                    return;
+                }
+                auto* value = static_cast<volatile uint64_t*>(
+                    b_memory.page_address(b_info.first_page + i));
+                *value = 200 + i;
+                if (*value != 200 + i) {
+                    fail("escritura concurrente perdida en la pagina " + std::to_string(i));
+                }
+            });
+        }
+        for (auto& writer : writers) writer.join();
+        require(failures.load() == 0, first_error);
+
+        for (unsigned i = 0; i < pages; ++i) {
+            require(a.resolve_fault(a_info.first_page + i, false, error), error);
+            require(*static_cast<volatile uint64_t*>(
+                        a_memory.page_address(a_info.first_page + i)) == 200 + i,
+                    "el dueno recibe el write-back de la pagina " + std::to_string(i));
+        }
+        for (unsigned i = 0; i < pages; ++i) {
+            require(b.resolve_fault(b_info.first_page + i, false, error), error);
+            require(*static_cast<volatile uint64_t*>(
+                        b_memory.page_address(b_info.first_page + i)) == 200 + i,
+                    "el cliente vuelve a leer la pagina " + std::to_string(i));
+        }
+
+        require(b.pager().release_region(region, error), error);
+        require(b.pager().page_snapshot().empty(), "el cliente libera todas las copias");
+        for (unsigned i = 0; i < pages; ++i) {
+            require(a.resolve_fault(a_info.first_page + i, false, error), error);
+            require(*static_cast<volatile uint64_t*>(
+                        a_memory.page_address(a_info.first_page + i)) == 200 + i,
+                    "el dueno conserva la pagina " + std::to_string(i));
+        }
+        require(a.pager().statistics().pages_owned == pages, "paginas propias del dueno");
+        require(a.pager().statistics().page_transfers > 0, "hubo transferencias de pagina");
+        require(a.pager().release_region(region, error), error);
+        require(a.pager().region_snapshot().empty(), "el dueno libera la region de estres");
+
+        b_network.stop();
+        a_network.stop();
+        std::cout << "Estres remoto con " << pages << " paginas e hilos: OK" << std::endl;
+    }
+
+    void missing_invalidation_ack() {        Config config = configuration(1);
         config.request_timeout_ms = 300;
         NetworkManager client(config, 123);
         std::string error;
@@ -443,9 +553,10 @@ namespace {
 }
 
 int main() {
-    alarm(35);
+    alarm(45);
     remote_faults_and_join(1);
     remote_faults_and_join(4);
+    multi_page_stress();
     reciprocal_requests(1);
     reciprocal_requests(4);
     independent_pages();

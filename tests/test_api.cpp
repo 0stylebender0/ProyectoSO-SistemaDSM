@@ -16,6 +16,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <vector>
 
 namespace {
     void require(bool condition, const std::string& message) {
@@ -73,6 +75,16 @@ namespace {
     void local_lifecycle() {
         require(!DSM::create_region(1).valid() && DSM::last_error() == DSMError::NOT_INITIALIZED,
                 "crear antes de initialize");
+        require(!DSM::attach_region(1, 1).valid() && DSM::last_error() == DSMError::NOT_INITIALIZED,
+                "adjuntar antes de initialize");
+        require(DSM::release_region(1) == DSMError::NOT_INITIALIZED,
+                "liberar antes de initialize");
+        require(DSM::get_local_node().id == 0 && DSM::get_nodes().empty() &&
+                DSM::get_regions().empty() && DSM::get_statistics().pages_owned == 0,
+                "consultas vacias antes de initialize");
+        require(DSM::get_remote_regions(1).empty() &&
+                DSM::last_error() == DSMError::NOT_INITIALIZED,
+                "descubrir regiones antes de initialize");
         require(DSM::initialize("/no-existe/dsm.conf") == DSMError::INITIALIZATION_ERROR,
                 "configuracion inexistente");
         Configuration config;
@@ -88,6 +100,15 @@ namespace {
                 "region de cero bytes");
         require(!DSM::create_region(std::numeric_limits<std::size_t>::max()).valid() &&
                 DSM::last_error() == DSMError::OUT_OF_MEMORY, "desbordamiento de tamano");
+        require(!DSM::attach_region(0, self.id).valid() &&
+                DSM::last_error() == DSMError::INVALID_REGION, "region cero al adjuntar");
+        require(!DSM::attach_region(1, 0).valid() &&
+                DSM::last_error() == DSMError::INVALID_REGION, "dueno cero al adjuntar");
+        require(!DSM::attach_region(1, 999999).valid() &&
+                DSM::last_error() == DSMError::NODE_UNAVAILABLE, "dueno desconocido al adjuntar");
+        require(DSM::get_remote_regions(999999).empty() &&
+                DSM::last_error() == DSMError::NODE_UNAVAILABLE, "dueno desconocido al descubrir");
+        require(DSM::release_region(0) == DSMError::INVALID_REGION, "liberar region cero");
         auto first = DSM::create_region(1);
         require(first.valid() && first.get_size() == config.page_size, "redondeo a pagina");
         auto second = DSM::create_region(config.page_size);
@@ -113,9 +134,13 @@ namespace {
         *first.as<volatile uint64_t>() = 123;
         require(*first.as<volatile uint64_t>() == 123, "lectura y escritura locales");
         require(DSM::attach_region(first.get_id(), self.id).data() == address, "adjuntar region local");
+        require(!DSM::attach_region(first.get_id(), self.id + 1).valid() &&
+                DSM::last_error() == DSMError::INVALID_REGION, "dueno incorrecto al adjuntar");
         require(DSM::get_statistics().pages_owned == 2, "estadisticas de regiones");
         require(DSM::release_region(first.get_id()) == DSMError::SUCCESS, "liberar region");
         require(!copy.valid() && copy.data() == nullptr && !first.valid(), "invalidar copias del handle");
+        require(DSM::get_regions().size() == 1 && DSM::get_remote_regions(self.id).size() == 1,
+                "la region liberada desaparece del descubrimiento");
         require(DSM::release_region(first.get_id()) == DSMError::INVALID_REGION, "doble liberacion");
         require(DSM::release_region(second.get_id()) == DSMError::SUCCESS, "liberar rango contiguo");
         auto whole = DSM::create_region(config.page_size * 8);
@@ -184,6 +209,64 @@ namespace {
         require(*region.as<volatile uint64_t>() == 456, "escritura desde hilo registrado");
         require(DSM::shutdown() == DSMError::SUCCESS, "shutdown despues de reunir hilos");
         std::cout << "API y guardias de hilo: OK\n";
+    }
+
+    void concurrent_regions() {
+        Configuration config;
+        require(DSM::initialize(config.path) == DSMError::SUCCESS, "initialize para estres");
+        constexpr unsigned region_count = 4;
+        constexpr unsigned pages_per_region = 2;
+        constexpr unsigned thread_count = region_count * pages_per_region;
+
+        std::vector<DSMRegion> regions;
+        for (unsigned i = 0; i < region_count; ++i) {
+            auto region = DSM::create_region(config.page_size * pages_per_region);
+            require(region.valid(), "region de estres");
+            regions.push_back(region);
+        }
+        require(DSM::get_regions().size() == region_count, "regiones de estres registradas");
+
+        const std::size_t words_per_page = config.page_size / sizeof(uint64_t);
+        std::atomic<unsigned> ready{0};
+        std::atomic<bool> go{false};
+        std::atomic<unsigned> failures{0};
+        std::vector<std::thread> workers;
+        for (unsigned i = 0; i < thread_count; ++i) {
+            workers.emplace_back([&, i] {
+                DSMThread guard;
+                if (!guard.valid()) {
+                    ++failures;
+                    ready.fetch_add(1);
+                    return;
+                }
+                auto* base = static_cast<volatile uint64_t*>(regions[i / pages_per_region].data());
+                const std::size_t offset = (i % pages_per_region) * words_per_page;
+                ready.fetch_add(1);
+                while (!go.load()) std::this_thread::yield();
+                base[offset] = 1000 + i;
+                if (base[offset] != 1000 + i) ++failures;
+            });
+        }
+        while (ready.load() != thread_count) std::this_thread::yield();
+        go = true;
+        for (auto& worker : workers) worker.join();
+        require(failures.load() == 0, "escritura concurrente en varias paginas");
+
+        for (unsigned i = 0; i < thread_count; ++i) {
+            auto* base = static_cast<volatile uint64_t*>(regions[i / pages_per_region].data());
+            const std::size_t offset = (i % pages_per_region) * words_per_page;
+            require(base[offset] == 1000 + i, "valor concurrente conservado");
+        }
+        require(DSM::get_statistics().pages_owned == region_count * pages_per_region,
+                "estadisticas del estres");
+        for (auto& region : regions) {
+            require(DSM::release_region(region.get_id()) == DSMError::SUCCESS,
+                    "liberar region de estres");
+            require(!region.valid(), "invalidar handle de estres");
+        }
+        require(DSM::get_regions().empty(), "no quedan regiones de estres");
+        require(DSM::shutdown() == DSMError::SUCCESS, "shutdown tras el estres");
+        std::cout << "API concurrente con varias regiones y paginas: OK\n";
     }
 
     enum class Operation { READ, RECREATE, QUIT };
@@ -276,6 +359,9 @@ namespace {
         ask(Operation::RECREATE);
         require(reply.region != old_id && reply.value == 0, "dueno borra y crea otra region limpia");
         require(DSM::release_region(old_id) == DSMError::SUCCESS, "desadjuntar region ya borrada por dueno");
+        require(!DSM::attach_region(old_id, reply.owner).valid() &&
+                DSM::last_error() == DSMError::NETWORK_ERROR,
+                "no volver a adjuntar una region eliminada");
         remote = DSM::attach_region(reply.region, reply.owner);
         require(remote.valid() && *remote.as<volatile uint64_t>() == 0, "adjuntar nueva region");
         *remote.as<volatile uint64_t>() = 777;
@@ -309,9 +395,10 @@ namespace {
 }
 
 int main(int argc, char** argv) {
-    alarm(35);
+    alarm(45);
     local_lifecycle();
     thread_lifecycle();
+    concurrent_regions();
     remote_lifecycle();
     if (argc == 2) external_app(argv[1]);
     std::cout << "test_api: OK\n";

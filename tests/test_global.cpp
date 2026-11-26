@@ -8,6 +8,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <sstream>
+#include <string>
 
 namespace {
     void require(bool condition, const std::string& message) {
@@ -57,10 +60,29 @@ namespace {
             return static_cast<volatile uint64_t*>(memory.page_address(info.first_page));
         }
     };
+
+    bool remove_line(std::string& text, const std::string& prefix) {
+        const auto start = text.find(prefix);
+        if (start == std::string::npos) return false;
+        auto end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        else ++end;
+        text.erase(start, end - start);
+        return true;
+    }
+
+    bool replace_line(std::string& text, const std::string& prefix, const std::string& replacement) {
+        const auto start = text.find(prefix);
+        if (start == std::string::npos) return false;
+        auto end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        text.replace(start, end - start, replacement);
+        return true;
+    }
 }
 
 int main() {
-    alarm(15);
+    alarm(20);
     const uint64_t page = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
     Participant a(111, "A", page * 2 + 1);
     Participant b(222, "B", page * 3, a.network.port());
@@ -104,6 +126,90 @@ int main() {
     require(incomplete.partial() && incomplete.responded == 2 &&
             !incomplete.nodes[1].error.empty(), "no sumar respuestas con datos duplicados");
 
+    const auto missing = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [&](const NodeInfo& node, uint8_t flags, std::string& why) {
+            auto text = query(node, flags, why);
+            if (node.id == 111 && !remove_line(text, "memory_pages_free=")) {
+                why = "no se pudo preparar el STATUS incompleto";
+            }
+            return text;
+        });
+    require(missing.partial() && missing.responded == 2 &&
+            missing.nodes[0].error.find("falta") != std::string::npos,
+            "un STATUS sin un campo obligatorio no se suma");
+
+    const auto duplicate = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [&](const NodeInfo& node, uint8_t flags, std::string& why) {
+            auto text = query(node, flags, why);
+            if (node.id == 111) text += "memory_pages_free=0\n";
+            return text;
+        });
+    require(duplicate.partial() && duplicate.responded == 2 &&
+            duplicate.nodes[0].error.find("repetido") != std::string::npos,
+            "un campo STATUS repetido no se suma");
+
+    const auto wrong_id = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [&](const NodeInfo& node, uint8_t flags, std::string& why) {
+            auto text = query(node, flags, why);
+            if (node.id == 111 && !replace_line(text, "node_id=", "node_id=999999\n")) {
+                why = "no se pudo preparar el node_id incorrecto";
+            }
+            return text;
+        });
+    require(wrong_id.partial() && wrong_id.responded == 2 &&
+            wrong_id.nodes[0].error.find("node_id") != std::string::npos,
+            "un STATUS con node_id ajeno no se suma");
+
+    const auto inconsistent = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [&](const NodeInfo& node, uint8_t flags, std::string& why) {
+            auto text = query(node, flags, why);
+            if (node.id == 111 && !replace_line(text, "memory_pages_free=", "memory_pages_free=99\n")) {
+                why = "no se pudo preparar el STATUS inconsistente";
+            }
+            return text;
+        });
+    require(inconsistent.partial() && inconsistent.responded == 2 &&
+            inconsistent.nodes[0].error.find("inconsistentes") != std::string::npos,
+            "un STATUS con contadores inconsistentes no se suma");
+
+    const auto invalid_number = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [&](const NodeInfo& node, uint8_t flags, std::string& why) {
+            auto text = query(node, flags, why);
+            if (node.id == 111 && !replace_line(text, "memory_pages_free=", "memory_pages_free=abc\n")) {
+                why = "no se pudo preparar el STATUS no numerico";
+            }
+            return text;
+        });
+    require(invalid_number.partial() && invalid_number.responded == 2 &&
+            invalid_number.nodes[0].error.find("invalido") != std::string::npos,
+            "un STATUS con un valor no numerico no se suma");
+
+    const auto overflow = status_report::collect(nodes, STATUS_FLAG_MEMORY,
+        [](const NodeInfo& node, uint8_t, std::string&) {
+            std::ostringstream text;
+            text << "node_id=" << node.id << "\n"
+                 << "memory_configured=" << std::numeric_limits<uint64_t>::max() << "\n"
+                 << "memory_reserved=" << std::numeric_limits<uint64_t>::max() << "\n"
+                 << "memory_pages_total=1\n"
+                 << "memory_pages_used=0\n"
+                 << "memory_pages_free=1\n";
+            return text.str();
+        });
+    require(overflow.partial() && overflow.responded == 1 &&
+            overflow.nodes[1].error.find("desbordamiento") != std::string::npos,
+            "un total global desbordado se descarta");
+
+    error.clear();
+    require(a.network.query_status(nodes.front(), 0x80, error).empty() &&
+            error.find("banderas") != std::string::npos,
+            "rechazar banderas STATUS desconocidas");
+    error.clear();
+    NodeInfo zero_id = nodes.front();
+    zero_id.id = 0;
+    require(a.network.query_status(zero_id, STATUS_FLAG_MEMORY, error).empty() &&
+            error.find("nodo o banderas") != std::string::npos,
+            "rechazar un nodo STATUS invalido");
+
     c.network.stop();
     const auto partial = status_report::collect(nodes, STATUS_FLAG_MEMORY, query);
     require(partial.partial() && partial.responded == 2 &&
@@ -129,6 +235,6 @@ int main() {
             "STATUS_REQUEST con timeout");
     require(std::chrono::steady_clock::now() - before < std::chrono::seconds(1), "timeout acotado");
     close(stalled);
-    std::cout << "test_global_status: OK (totales, copias MSI, datos invalidos, respuesta parcial y timeout)\n";
+    std::cout << "test_global: OK (totales, copias MSI, datos invalidos, parcial, desbordamiento y timeout)\n";
     return 0;
 }

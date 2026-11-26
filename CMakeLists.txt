@@ -5,6 +5,20 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Uso: cmake -B build-asan -DDSM_SANITIZERS=address,undefined
+#      cmake -B build-tsan -DDSM_SANITIZERS=thread
+# Los flujos DSM usan SIGSEGV y pila alternativa; ASan/UBSan se ejecutan
+# sobre toda la suite y TSan de forma selectiva (ver scripts/run_sanitizers.sh).
+set(DSM_SANITIZERS "" CACHE STRING
+    "Sanitizers de GCC/Clang, por ejemplo address,undefined o thread")
+if(DSM_SANITIZERS)
+    add_compile_options(-fsanitize=${DSM_SANITIZERS} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${DSM_SANITIZERS})
+    if(DSM_SANITIZERS MATCHES "address|undefined")
+        add_compile_options(-fno-sanitize-recover=all)
+    endif()
+endif()
+
 find_package(Threads REQUIRED)
 
 add_library(dsm STATIC
@@ -44,19 +58,25 @@ add_executable(test_api tests/test_api.cpp)
 target_compile_options(test_api PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_api PRIVATE dsm)
 add_test(NAME api COMMAND test_api "$<TARGET_FILE:dsm_app>")
-set_tests_properties(api PROPERTIES TIMEOUT 40)
+set_tests_properties(api PROPERTIES TIMEOUT 60)
 
-add_executable(test_global_status tests/test_global_status.cpp)
-target_compile_options(test_global_status PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(test_global_status PRIVATE dsm)
-add_test(NAME global_status COMMAND test_global_status)
-set_tests_properties(global_status PROPERTIES TIMEOUT 20)
+add_executable(test_global tests/test_global.cpp)
+target_compile_options(test_global PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_global PRIVATE dsm)
+add_test(NAME global COMMAND test_global)
+set_tests_properties(global PROPERTIES TIMEOUT 25)
+
+add_executable(test_release tests/test_release.cpp)
+target_compile_options(test_release PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_release PRIVATE dsm)
+add_test(NAME release COMMAND test_release)
+set_tests_properties(release PROPERTIES TIMEOUT 30)
 
 add_executable(test_heartbeat tests/test_heartbeat.cpp)
 target_compile_options(test_heartbeat PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_heartbeat PRIVATE dsm)
 add_test(NAME heartbeat COMMAND test_heartbeat)
-set_tests_properties(heartbeat PROPERTIES TIMEOUT 20)
+set_tests_properties(heartbeat PROPERTIES TIMEOUT 30)
 
 add_executable(test_protocol
     tests/test_protocol.cpp
@@ -151,7 +171,7 @@ target_include_directories(test_concurrency PRIVATE include)
 target_compile_options(test_concurrency PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_concurrency PRIVATE Threads::Threads)
 add_test(NAME concurrency COMMAND test_concurrency)
-set_tests_properties(concurrency PROPERTIES TIMEOUT 40)
+set_tests_properties(concurrency PROPERTIES TIMEOUT 60)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
