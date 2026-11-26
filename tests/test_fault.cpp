@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -178,6 +179,68 @@ namespace {
         thread.join();
     }
 
+    void callback_failure() {
+        const uint32_t page_size = static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
+        MemoryManager memory(page_size, page_size);
+        std::string error;
+        require(memory.reserve(error), error);
+        SignalHandler faults(memory, [](PageId, bool, std::string& why) {
+            why = "fallo simulado de resolucion";
+            return false;
+        });
+        require(faults.start(error), error);
+        FaultAccess access;
+        require(begin_fault_access(access), "registrar acceso DSM");
+        volatile sig_atomic_t returned = 0;
+        if (sigsetjmp(access.jump, 1) == 0) {
+            *static_cast<volatile char*>(memory.base()) = 1;
+            returned = 1;
+            end_fault_access();
+        }
+        require(returned == 0, "un fallo no resuelto debe abandonar el acceso");
+        require(access.has_failed(), "el acceso conserva el error del worker");
+        require(std::string(access.message()).find("simulado") != std::string::npos,
+                "el acceso informa la causa del fallo");
+        end_fault_access();
+        faults.stop();
+    }
+
+    void shutdown_in_flight() {
+        const uint32_t page_size = static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
+        MemoryManager memory(page_size, page_size);
+        std::string error;
+        require(memory.reserve(error), error);
+        std::atomic<bool> entered{false};
+        std::atomic<bool> stopping_started{false};
+        std::atomic<bool> resume{false};
+        std::atomic<bool> stopped{false};
+        SignalHandler faults(memory, [&](PageId page, bool, std::string& why) {
+            entered.store(true, std::memory_order_release);
+            while (!resume.load(std::memory_order_acquire)) std::this_thread::yield();
+            return memory.protect_page(page, PROT_READ | PROT_WRITE, why);
+        }, 1);
+        require(faults.start(error), error);
+        std::thread stopper([&] {
+            while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
+            stopping_started.store(true, std::memory_order_release);
+            faults.stop();
+            stopped.store(true, std::memory_order_release);
+        });
+        std::thread helper([&] {
+            while (!stopping_started.load(std::memory_order_acquire)) std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            require(!stopped.load(std::memory_order_acquire),
+                    "stop no debe terminar mientras hay un fallo en curso");
+            resume.store(true, std::memory_order_release);
+        });
+        *static_cast<volatile char*>(memory.base()) = 5;
+        helper.join();
+        stopper.join();
+        require(stopped.load(std::memory_order_acquire), "stop termina tras resolver el fallo");
+        require(*static_cast<volatile char*>(memory.base()) == 5,
+                "el acceso se completa tras el apagado del handler");
+    }
+
     template <typename Function>
     bool run(const char* name, Function function, int expected_signal = 0) {
         const pid_t child = fork();
@@ -191,8 +254,12 @@ namespace {
         while (waitpid(child, &status, 0) == -1) {
             if (errno != EINTR) return false;
         }
-        const bool ok = expected_signal ? WIFSIGNALED(status) && WTERMSIG(status) == expected_signal :
-                                         WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        bool ok = expected_signal ? WIFSIGNALED(status) && WTERMSIG(status) == expected_signal :
+                                    WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#if defined(__SANITIZE_ADDRESS__)
+        // ASan intercepta el SIGSEGV voluntario de estas pruebas y aborta.
+        if (!ok && expected_signal == SIGSEGV && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) ok = true;
+#endif
         std::cout << name << ": " << (ok ? "OK" : "FALLO") << std::endl;
         return ok;
     }
@@ -207,5 +274,7 @@ int main() {
     ok &= run("Fallos repetidos sin perder despertares", repeated_faults);
     ok &= run("SIGSEGV externo conserva su comportamiento", external_fault, SIGSEGV);
     ok &= run("Un hilo sin pila alternativa no se registra implicitamente", unprepared_thread, SIGSEGV);
+    ok &= run("Un worker que falla aborta el acceso sin matar el proceso", callback_failure);
+    ok &= run("Apagar el handler espera al fallo en curso", shutdown_in_flight);
     return ok ? 0 : 1;
 }

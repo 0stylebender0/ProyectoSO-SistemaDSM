@@ -682,26 +682,36 @@ El campo `message_id` permitirá identificar cada solicitud y relacionar respues
 
 ## 7.3 Tipos de mensajes
 
-Se definen los siguientes tipos iniciales:
+Se definen los siguientes 20 tipos (`MessageType` en `include/protocol.hpp`).
+Toda la comunicación de control, páginas y consultas comparte el único socket TCP
+en `tcp_port`; no existe un puerto de control separado. El heartbeat usa UDP.
 
 | Código | Mensaje | Transporte | Descripción |
 |---:|---|---|---|
 | 1 | JOIN_REQUEST | TCP | Solicita incorporación al sistema. |
 | 2 | JOIN_RESPONSE | TCP | Responde a una solicitud de incorporación. |
-| 3 | NODE_ANNOUNCE | TCP | Anuncia un nuevo nodo. |
+| 3 | NODE_ANNOUNCE | TCP | Anuncia un nuevo nodo a los participantes. |
 | 4 | NODE_LIST_REQUEST | TCP | Solicita la lista de participantes conocidos. |
 | 5 | NODE_LIST_RESPONSE | TCP | Devuelve información de nodos conocidos. |
-| 6 | PAGE_REQUEST | TCP | Solicita una página de memoria. |
-| 7 | PAGE_DATA | TCP | Transfiere el contenido de una página. |
-| 8 | INVALIDATE | TCP | Solicita invalidar una copia. |
+| 6 | PAGE_REQUEST | TCP | Solicita una página (lectura o escritura). |
+| 7 | PAGE_DATA | TCP | Transfiere el contenido y la versión de una página. |
+| 8 | INVALIDATE | TCP | Solicita invalidar una copia remota. |
 | 9 | INVALIDATE_ACK | TCP | Confirma una invalidación. |
-| 10 | PAGE_RELEASE | TCP | Notifica liberación o cambio de asignación. |
-| 11 | STATUS_REQUEST | TCP | Solicita información del estado del nodo. |
-| 12 | STATUS_RESPONSE | TCP | Devuelve información estadística. |
-| 13 | ERROR_RESPONSE | TCP | Informa sobre un error. |
+| 10 | PAGE_RELEASE | TCP | Devuelve una copia modificada al dueño. |
+| 11 | STATUS_REQUEST | TCP | Solicita secciones del estado del nodo. |
+| 12 | STATUS_RESPONSE | TCP | Devuelve texto con las secciones solicitadas. |
+| 13 | ERROR_RESPONSE | TCP | Informa sobre un error de protocolo o de página. |
 | 14 | HEARTBEAT | UDP | Informa que un nodo continúa activo. |
+| 15 | NODE_LEAVE | TCP | Notifica la salida ordenada de un nodo. |
+| 16 | NODE_LEAVE_ACK | TCP | Confirma la salida del nodo. |
+| 17 | REGION_INFO_REQUEST | TCP | Consulta una región por identificador y dueño. |
+| 18 | REGION_INFO_RESPONSE | TCP | Devuelve la descripción de la región. |
+| 19 | REGION_LIST_REQUEST | TCP | Solicita las regiones propias de un nodo. |
+| 20 | REGION_LIST_RESPONSE | TCP | Devuelve las regiones propias del nodo. |
 
-Los mensajes podrán ampliarse durante el desarrollo del prototipo.
+El código `13` (`ERROR_RESPONSE`) transporta los códigos de la sección 7.9.
+Los mensajes 15 a 20 se añadieron para la salida ordenada y el descubrimiento
+de regiones. La versión actual del protocolo es 6.
 
 ## 7.4 Mensaje JOIN_REQUEST
 
@@ -828,6 +838,27 @@ El protocolo deberá contemplar los siguientes errores:
 | 8 | VERSION_MISMATCH | Versión de página incorrecta. |
 | 9 | TIMEOUT | Tiempo de espera agotado. |
 | 10 | PROTOCOL_MISMATCH | Versiones de protocolo incompatibles. |
+
+La respuesta a cada mensaje usa los siguientes códigos. `INVALID_MESSAGE` se
+aplica a cualquier mensaje mal formado, y `UNKNOWN_NODE` a un `receiver_id`
+ajeno cuando la cabecera lo especifica.
+
+| Mensaje | Errores posibles |
+|---|---|
+| JOIN_REQUEST / JOIN_RESPONSE | INVALID_MESSAGE, PROTOCOL_MISMATCH, INVALID_STATE |
+| NODE_ANNOUNCE | INVALID_MESSAGE, PROTOCOL_MISMATCH, INVALID_STATE |
+| NODE_LEAVE / NODE_LEAVE_ACK | INVALID_MESSAGE, UNKNOWN_NODE |
+| NODE_LIST_REQUEST / NODE_LIST_RESPONSE | INVALID_MESSAGE, OUT_OF_MEMORY |
+| PAGE_REQUEST / PAGE_DATA | INVALID_MESSAGE, PAGE_NOT_FOUND, INVALID_STATE |
+| INVALIDATE / INVALIDATE_ACK | INVALID_MESSAGE, INVALID_STATE |
+| PAGE_RELEASE | INVALID_MESSAGE, INVALID_STATE |
+| STATUS_REQUEST / STATUS_RESPONSE | INVALID_MESSAGE, INVALID_STATE |
+| REGION_INFO_REQUEST / REGION_INFO_RESPONSE | INVALID_MESSAGE, PAGE_NOT_FOUND, INVALID_STATE |
+| REGION_LIST_REQUEST / REGION_LIST_RESPONSE | INVALID_MESSAGE, PAGE_NOT_FOUND, INVALID_STATE |
+| HEARTBEAT | Sin respuesta: los datagramas inválidos se descartan. |
+
+Los errores de tiempo de espera (`TIMEOUT`) y de nodo no disponible
+(`NODE_UNAVAILABLE`) los determina el solicitante, no el receptor.
 
 ---
 
@@ -980,23 +1011,15 @@ public:
 
     size_t get_size() const;
 
-    void* data();
+    bool read(size_t offset, void* buffer, size_t size) const;
 
-    const void* data() const;
-
-    template<typename T>
-    T* as();
-
-    template<typename T>
-    const T* as() const;
+    bool write(size_t offset, const void* buffer, size_t size);
 
     bool valid() const;
 };
 ```
 
-La función `data()` devolverá la dirección virtual local de la región DSM.
-
-Los accesos realizados sobre esta dirección serán controlados por los mecanismos de protección de memoria y paginación bajo demanda.
+`read()` y `write()` copian bytes dentro de los límites de la región; devuelven `false` si el rango no cabe, si la región fue liberada o si el worker no pudo resolver una página. Internamente acceden a la dirección virtual local mediante los mecanismos de protección de memoria y paginación bajo demanda.
 
 ## 9.5 Descripción de funciones
 
@@ -1011,8 +1034,8 @@ Los accesos realizados sobre esta dirección serán controlados por los mecanism
 | get_nodes | Obtiene la lista de nodos conocidos. | Ninguna. | Vector de nodos. |
 | get_id | Obtiene el identificador de una región. | Ninguna. | Identificador. |
 | get_size | Obtiene el tamaño de una región. | Ninguna. | Tamaño en bytes. |
-| data | Obtiene la dirección virtual de la región. | Ninguna. | Puntero a memoria. |
-| as<T> | Obtiene un puntero tipado. | Tipo de dato. | Puntero tipado. |
+| read | Copia bytes desde un desplazamiento de la región. | Desplazamiento, buffer y tamaño. | Éxito o error DSM. |
+| write | Copia bytes hacia un desplazamiento de la región. | Desplazamiento, buffer y tamaño. | Éxito o error DSM. |
 | valid | Comprueba si la región es válida. | Ninguna. | Valor booleano. |
 
 ## 9.6 Ejemplo de utilización
@@ -1033,10 +1056,7 @@ int main() {
         return 1;
     }
 
-    auto region = DSM::create_region(
-        4096 * 100,
-        DSMAccess::READ_WRITE
-    );
+    auto region = DSM::create_region(4096 * 100);
 
     if (!region.valid()) {
         std::cerr << "Error creating region\n";
@@ -1044,14 +1064,20 @@ int main() {
         return 1;
     }
 
-    int* values = region.as<int>();
-
     for (int i = 0; i < 1000; i++) {
-        values[i] = i;
+        const int value = i;
+        if (!region.write(i * sizeof(int), &value, sizeof(value))) {
+            std::cerr << "Error writing DSM\n";
+            return 1;
+        }
     }
 
-    std::cout << "First value: "
-              << values[0] << '\n';
+    int first = 0;
+    if (!region.read(0, &first, sizeof(first))) {
+        std::cerr << "Error reading DSM\n";
+        return 1;
+    }
+    std::cout << "First value: " << first << '\n';
 
     DSM::release_region(region.get_id());
 
@@ -1065,15 +1091,14 @@ Este ejemplo representa la interfaz deseada. La implementación interna será re
 
 ### 9.7 Consideraciones del API
 
-El acceso mediante punteros permitirá mantener una interfaz similar a la programación tradicional con memoria.
+El acceso mediante copias acotadas evita exponer punteros que queden colgando tras una liberación.
 
-Sin embargo, se deberán establecer las siguientes restricciones:
+Se aplican las siguientes restricciones:
 
 - Las regiones tendrán un tamaño definido al momento de crearse.
-- Los accesos deberán realizarse dentro de los límites de la región.
-- Los permisos deberán respetarse.
-- Los punteros serán válidos únicamente dentro del proceso que creó la representación virtual local.
-- No se deberán transmitir punteros entre nodos. Se transmitirán identificadores de región, desplazamientos y datos.
+- `read()` y `write()` validan que el rango completo quepa en la región.
+- Un `DSMRegion` copiado comparte el handle; `release_region(id)` y `shutdown()` invalidan todas sus copias.
+- No se transmiten direcciones entre nodos. Se transmiten identificadores de región, desplazamientos y datos.
 - Las operaciones de sincronización entre hilos de aplicación deberán utilizar los mecanismos definidos por el DSM.
 
 El API podrá ampliarse durante los siguientes prototipos según las necesidades de las aplicaciones de validación.
@@ -1081,6 +1106,27 @@ El API podrá ampliarse durante los siguientes prototipos según las necesidades
 ### 9.8 API implementada en el hito 3.1
 
 La cabecera pública es `include/dsm.hpp` y la biblioteca es `build/libdsm.a`. Las aplicaciones no necesitan incluir las cabeceras de red, páginas o señales. `apps/dsm_app.cpp` muestra cómo crear una región o adjuntar una región remota mediante `DSM::attach_region(region_id, owner_id)`.
+
+#### API público completo
+
+| Función | Resultado | Errores (`DSMError`) |
+|---|---|---|
+| `DSM::initialize(config)` | Prepara el runtime del proceso. | SUCCESS, ALREADY_INITIALIZED, BUSY, INITIALIZATION_ERROR, OUT_OF_MEMORY, NETWORK_ERROR |
+| `DSM::create_region(size, access)` | Región propia; actualiza `last_error()`. | SUCCESS, NOT_INITIALIZED, INVALID_ACCESS, INVALID_REGION, OUT_OF_MEMORY |
+| `DSM::attach_region(id, owner)` | Copia local de una región remota. | SUCCESS, NOT_INITIALIZED, INVALID_REGION, NODE_UNAVAILABLE, NETWORK_ERROR |
+| `DSM::release_region(id)` | Libera la región o desadjunta la copia. | SUCCESS, NOT_INITIALIZED, INVALID_REGION, BUSY, NETWORK_ERROR |
+| `DSM::shutdown()` | Cierra el runtime en el hilo de `initialize`. | SUCCESS, INVALID_THREAD, BUSY, NETWORK_ERROR |
+| `DSM::get_statistics()` | Contadores locales del proceso. | SUCCESS |
+| `DSM::get_local_node()` | Identidad y puertos del nodo local. | SUCCESS |
+| `DSM::get_nodes()` | Snapshot de participantes conocidos. | SUCCESS |
+| `DSM::get_regions()` | Regiones propias y copias adjuntadas. | SUCCESS |
+| `DSM::get_remote_regions(owner)` | Regiones propias de `owner`. | SUCCESS, INVALID_REGION, NODE_UNAVAILABLE, NETWORK_ERROR |
+| `DSM::last_error()` / `last_error_message()` | Estado del último error del hilo. | Cualquiera de los anteriores |
+| `DSMRegion::get_id()` / `get_size()` | Identificador y tamaño redondeado. | Sin error propio |
+| `DSMRegion::read(offset, buffer, size)` | Copia bytes de la región. | SUCCESS, INVALID_REGION, PAGE_FAULT_ERROR |
+| `DSMRegion::write(offset, buffer, size)` | Copia bytes a la región. | SUCCESS, INVALID_REGION, PAGE_FAULT_ERROR |
+| `DSMRegion::valid()` | Comprueba que el handle local siga vivo. | Sin error propio |
+| `DSMThread()` / `valid()` | Registra al hilo adicional mientras accede a DSM. | `valid()` es false si el hilo no se registró |
 
 ```sh
 cmake -B build
@@ -1108,12 +1154,12 @@ Contrato de esta versión:
 - Existe un runtime DSM por proceso. `initialize` y `shutdown` deben ejecutarse en el mismo hilo. El hilo inicial queda preparado automáticamente para los fallos de página.
 - Cada hilo adicional debe mantener una guardia `DSMThread` durante sus accesos a memoria DSM y comprobar `valid()`. La guardia se crea y destruye en ese hilo. `shutdown` devuelve `BUSY` si todavía existen guardias o llamadas pendientes; la aplicación debe reunir sus hilos antes de apagar DSM.
 - Solo se admite `DSMAccess::READ_WRITE`. `READ` y `WRITE` devuelven `INVALID_ACCESS` porque todavía no se imponen permisos por región.
-- Los tamaños se redondean al tamaño de página configurado. `as<T>()` convierte el puntero; no construye objetos ni valida que quepan. La aplicación respeta los límites y sincroniza sus accesos concurrentes.
-- Copiar un `DSMRegion` copia su handle; destruirlo no libera la región. `release_region(id)` y `shutdown()` invalidan todas sus copias locales; `data()` devuelve `nullptr` después. Los punteros obtenidos previamente dejan de ser utilizables.
+- Los tamaños se redondean al tamaño de página configurado. `read()` y `write()` copian bytes y validan los límites; la aplicación sincroniza sus accesos concurrentes.
+- Copiar un `DSMRegion` copia su handle; destruirlo no libera la región. `release_region(id)` y `shutdown()` invalidan todas sus copias locales; las copias invalidadas devuelven `INVALID_REGION`.
 - Antes de liberar una región se deben detener sus accesos y las otras operaciones sobre ella. Desadjuntar una región remota devuelve cualquier contenido modificado al dueño mediante `PAGE_RELEASE`. Liberarla en el dueño invalida las copias remotas y destruye la región; sus usuarios deben coordinar ese cierre. `valid()` comprueba la vida del handle local, no la disponibilidad del dueño remoto.
-- Los espacios liberados se limpian y pueden reutilizarse; los rangos libres contiguos se fusionan. Si una liberación explícita falla por timeout, conserva el handle para reintentar. `shutdown` intenta devolver los datos y cierra los recursos incluso si algún nodo no responde, informando el error.
+- Los espacios liberados se limpian y pueden reutilizarse; los rangos libres contiguos se fusionan. Si una liberación explícita falla por timeout, conserva el handle para reintentar. `shutdown` informa `NETWORK_ERROR` si no puede devolver los datos y mantiene el runtime vivo para reintentarlo.
 - `last_error()` y `last_error_message()` pertenecen al hilo que realizó la última llamada. Las consultas devuelven snapshots de nodos y estadísticas.
-- Se mantienen las restricciones actuales: Linux x86-64, uso reservado de `SIGUSR1`, sin persistencia ni recuperación de datos ante la caída del dueño. El protocolo pasa a versión 5 para incorporar la liberación con write-back; todos los nodos deben recompilarse.
+- Se mantienen las restricciones actuales: Linux x86-64, uso reservado de `SIGUSR1`, sin persistencia ni recuperación de datos ante la caída del dueño. El protocolo usa la versión 6; todos los nodos deben recompilarse con la misma revisión.
 
 ---
 
@@ -1134,6 +1180,16 @@ bash scripts/demo_local.sh
 ```
 
 `--global` sin otra selección muestra memoria, páginas y estadísticas. `--global --nodes` comprueba disponibilidad sin pedir esas secciones. `--all` incluye también memoria e historial. Las tablas alinean los encabezados con sus valores y convierten bytes a KB o MB usando divisores de 1024; las líneas `total_...` conservan los enteros exactos en bytes o contadores.
+
+`--html` genera un archivo en el directorio actual con el mismo texto de la
+consulta, y `--open` lo abre con `xdg-open` (implica `--html`). El nombre es
+`dsm-global-<IPv4>-<puerto>.html` para `--global` y
+`dsm-node-<IPv4>-<puerto>.html` en caso contrario, de modo que varios nodos en
+una misma máquina no se sobrescriban. El texto se escapa antes de incrustarlo
+en el HTML porque las líneas `node_name` y `error` provienen de participantes
+remotos. Las líneas de página incluyen `pid=` (proceso que creó la región) y
+`order=` (orden de asignación local); ambos son cero en las copias remotas
+porque esos datos no viajan en el protocolo.
 
 `STATUS_FLAG_MEMORY` utiliza el bit `0x08` y solicita `memory_configured`, `memory_reserved`, `memory_pages_total`, `memory_pages_used` y `memory_pages_free`. La memoria configurada conserva el tamaño solicitado; la reservada incluye el redondeo a páginas. Las páginas usadas son las asignadas a regiones locales, propias o adjuntas, aunque estén en estado I. Las libres pueden reutilizarse para crear o adjuntar regiones. Estos valores describen la reserva virtual DSM, no el consumo físico de RAM.
 
@@ -1184,6 +1240,24 @@ tabla del Pager, sin abrir TCP.
 La consulta reutiliza `REGION_LIST_REQUEST`/`REGION_LIST_RESPONSE`, ya usados por
 la demo interna del hito 2.7. No cambia el protocolo, que continúa en versión 6.
 
+### 9.11 Aplicaciones de la API
+
+Además de `dsm_app` (un valor escalar), el proyecto incluye dos aplicaciones
+sustantivas que usan solamente la API pública:
+
+- `dsm_array <config> --create <n> [<hold-ms>]` inicializa un arreglo de `n`
+  enteros de 64 bits, imprime su suma y, tras la espera opcional, vuelve a leer
+  el primer elemento. `dsm_array <config> --attach <region_id> <owner_id> <n>`
+  adjunta la región, suma sus elementos y escribe la suma en la posición cero.
+- `dsm_matrix <config> --create <filas> <columnas> [<hold-ms>]` y
+  `dsm_matrix <config> --attach <region_id> <owner_id> <filas> <columnas>`
+  hacen lo mismo sobre una matriz, informando la suma de cada fila y el total.
+
+La prueba `ctest -R apps` lanza dos nodos por aplicación: el dueño crea y
+mantiene la región, el segundo la adjunta y modifica. Comprueba que ambos
+calculan la misma suma, que la escritura remota reaparece en el dueño y que se
+registran fallos y transferencias de página.
+
 # 10. Archivo de configuración
 
 ## 10.1 Descripción
@@ -1192,7 +1266,7 @@ El sistema utilizará un archivo de configuración general denominado `dsm.conf`
 
 Este archivo permitirá establecer los parámetros necesarios para ejecutar los nodos sin modificar el código fuente.
 
-La configuración no contendrá una cantidad fija de nodos ni requerirá conocer previamente todos los participantes.
+La configuración no fija una cantidad de nodos. `bootstrap_nodes` indica una semilla y `node_addresses` puede listar todos los participantes conocidos como semillas alternativas; ninguno de los dos es obligatorio.
 
 Se utilizarán parámetros para definir los puertos, el tamaño de página, la cantidad de memoria aportada y los intervalos de comunicación.
 
@@ -1208,10 +1282,11 @@ page_size=4096
 bind_address=0.0.0.0
 tcp_port=27400
 heartbeat_port=27401
-control_port=27402
 
 [discovery]
 bootstrap_nodes=
+# Opcional: participantes disponibles, separados por coma (host:puerto).
+node_addresses=192.168.1.10:27400,192.168.1.11:27400
 
 [heartbeat]
 interval_ms=1000
@@ -1222,7 +1297,6 @@ worker_count=4
 max_connections=64
 
 [paging]
-max_pending_faults=1024
 request_timeout_ms=5000
 ```
 
@@ -1236,13 +1310,12 @@ request_timeout_ms=5000
 | bind_address | string | 0.0.0.0 | Dirección donde se escucharán conexiones. |
 | tcp_port | uint16_t | 5000 | Puerto principal TCP. |
 | heartbeat_port | uint16_t | 0 o 27401 | Puerto UDP de heartbeat. `0` solicita un puerto efímero; la configuración de producción usa 27401. |
-| control_port | uint16_t | 5002 | Puerto reservado para control, si se utiliza un canal separado. |
-| bootstrap_nodes | list | Vacío | Nodos iniciales conocidos. |
+| bootstrap_nodes | string | Vacío | Semilla inicial en formato `host:puerto`. |
+| node_addresses | list | Vacío | Participantes disponibles (`host:puerto`, separados por coma). Se prueban en orden como semillas junto con `bootstrap_nodes`; basta que uno responda. |
 | interval_ms | uint32_t | 1000 | Intervalo entre heartbeats. |
 | timeout_ms | uint32_t | 5000 | Tiempo para considerar sospechoso un nodo. |
 | worker_count | uint32_t | 4 | Cantidad de hilos de procesamiento de red. |
 | max_connections | uint32_t | 64 | Máximo de conexiones TCP concurrentes. |
-| max_pending_faults | uint32_t | 1024 | Capacidad de eventos pendientes de resolución. |
 | request_timeout_ms | uint32_t | 5000 | Tiempo máximo de espera de solicitudes. |
 
 Los valores presentados son iniciales y podrán ajustarse según los resultados de las pruebas.
@@ -1552,10 +1625,13 @@ Se espera contar con:
 
 ## Sincronización implementada en el hito 2.6
 
-El mutex de tablas del Pager protege el registro de regiones y las referencias
-a páginas. Se libera antes de tomar el mutex de una página. Cada página protege
-su estado MSI, directorio, respaldo y fallo pendiente con su propio mutex.
-Los snapshots de páginas toman un solo mutex de página a la vez.
+Las tablas del Pager están protegidas por un semáforo POSIX binario
+(`sem_t`, inicializado con valor 1) y por un `std::mutex`. `TableGuard` toma
+siempre el semáforo antes que el mutex y libera ambos en orden inverso, incluso
+si una operación lanza una excepción. El mutex de tablas se libera antes de
+tomar el mutex de una página. Cada página protege su estado MSI, directorio,
+respaldo y fallo pendiente con su propio mutex; los snapshots toman un solo
+mutex de página a la vez. El semáforo se destruye en `~Pager()`.
 
 Los hilos que coinciden en un fallo esperan su misma condición y reciben el
 mismo resultado, incluido un error. El primer hilo realiza la solicitud remota;
@@ -1906,7 +1982,7 @@ Reglas de despliegue:
 - Todos los nodos deben usar el mismo `page_size`, la misma versión del
   protocolo (6) y binarios compilados desde la misma revisión.
 - Se necesita TCP de entrada en `tcp_port` (27400 por defecto) y UDP de entrada
-  en `heartbeat_port` (27401). `control_port` (27402) queda reservado.
+  en `heartbeat_port` (27401).
 - El heartbeat usa `steady_clock`; no requiere sincronizar relojes entre
   máquinas.
 
@@ -1925,8 +2001,11 @@ páginas y dos hilos, y comprueba:
 - tres regiones observadas por los tres nodos;
 - un único valor de checksum por región.
 
+`tests/test_apps.py` exercises `dsm_array` and `dsm_matrix` with two nodes each;
+la configuración del segundo nodo incluye una semilla caída antes de la válida
+para comprobar el reintento de `node_addresses`.
 `scripts/demo_final.sh` se ejecuta además como prueba `final_demo` y cubre la
-caída `SIGKILL` y la reincorporación. La suite completa queda en 14 pruebas:
+caída `SIGKILL` y la reincorporación. La suite completa queda en 16 pruebas:
 
 ```sh
 cmake -B build
@@ -1945,3 +2024,39 @@ ctest --test-dir build --output-on-failure
   cuyo dueño cae sigue fuera del alcance de esta entrega.
 - La guía remota asume conectividad IPv4 directa entre las máquinas; no cubre
   NAT, túneles ni descubrimiento por nombres DNS.
+
+## 19.7 Resultados medidos y problemas encontrados
+
+Resultados obtenidos en este entorno (Linux x86-64, localhost, compilación
+Debug con GCC):
+
+| Ejecución | Resultado |
+|---|---|
+| `ctest --test-dir build --output-on-failure` | 16/16 pruebas superadas |
+| `scripts/run_sanitizers.sh` (ASan + UBSan, suite completa) | 16/16 sin errores |
+| `scripts/run_sanitizers.sh` (TSan, subconjunto selectivo) | 5/5 sin errores |
+| `ctest -R validation` repetido 10 veces | 10/10 |
+
+La duración total de la suite sin sanitizers es de aproximadamente 37 segundos;
+`final_demo` aporta la mayor parte. `apps` tarda unos 8 segundos porque cada
+aplicación mantiene el nodo dueño cuatro segundos.
+
+Problemas encontrados durante la implementación:
+
+- La prueba de validación terminaba con `SIGSEGV` de forma intermitente. La
+  causa no era la coherencia MSI, sino un cierre fallido: `Runtime::close()`
+  dejaba los hilos de red y heartbeat en marcha; al destruir `Runtime`, el nodo
+  se destruía antes que la red y un worker entraba en `Pager::find_region_page()`
+  sobre un Pager ya liberado. `~Runtime()` fuerza `stop()` de ambos servicios
+  tras un cierre fallido, antes de destruir los miembros. El mismo escenario se
+  repitió diez veces sin fallos.
+- La prueba de concurrencia asumía que el solicitante veía una transferencia de
+  página, pero el dueño podía satisfacer la solicitud desde su copia. Se
+  comprobó que el fallo también ocurría en la revisión inicial y se ajustó la
+  aserción para exigir la transferencia en el nodo solicitante.
+- Las pruebas de fallo provocan `SIGSEGV` intencionalmente; con ASan se acepta
+  `SIGABRT` como salida equivalente porque el sanitizer intercepta la señal.
+- No es posible producir evidencia real de ejecución en máquinas físicas
+  separadas desde este entorno. `docs/remote.md` describe el procedimiento, los
+  puertos y las configuraciones, pero esa prueba queda pendiente de ejecutarse
+  en el cluster destino; aquí solo se han verificado tres nodos en localhost.

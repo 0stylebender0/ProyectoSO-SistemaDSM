@@ -32,13 +32,11 @@ def write_config(path, name, port, bootstrap=""):
             "bind_address=127.0.0.1",
             f"tcp_port={port}",
             "heartbeat_port=0",
-            "control_port=65000",
             f"bootstrap_nodes={bootstrap}",
             "interval_ms=200",
             "timeout_ms=1000",
             "worker_count=2",
             "max_connections=32",
-            "max_pending_faults=128",
             "request_timeout_ms=2000",
             "",
         ])

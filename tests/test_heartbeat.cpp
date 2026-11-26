@@ -105,6 +105,12 @@ namespace {
 
         const int fd = socket(AF_INET, SOCK_DGRAM, 0);
         require(fd != -1, "socket UDP emisor");
+        sockaddr_in source{};
+        source.sin_family = AF_INET;
+        source.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        source.sin_port = htons(known.heartbeat_port);
+        require(bind(fd, reinterpret_cast<sockaddr*>(&source), sizeof(source)) == 0,
+                "enlazar el emisor a la direccion del par conocido");
         sockaddr_in destination{};
         destination.sin_family = AF_INET;
         destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -142,6 +148,22 @@ namespace {
         valid.timestamp = 999;
         valid.sequence_number = 7;
         require(serialize_heartbeat(valid, bytes, error), error);
+        const int wrong_source = socket(AF_INET, SOCK_DGRAM, 0);
+        require(wrong_source != -1, "socket UDP suplantado");
+        sockaddr_in foreign{};
+        foreign.sin_family = AF_INET;
+        foreign.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        foreign.sin_port = htons(free_udp_port());
+        require(bind(wrong_source, reinterpret_cast<sockaddr*>(&foreign), sizeof(foreign)) == 0,
+                "enlazar el emisor suplantado");
+        const ssize_t forged = sendto(wrong_source, bytes.data(), bytes.size(), 0,
+                                      reinterpret_cast<const sockaddr*>(&destination),
+                                      sizeof(destination));
+        require(forged == static_cast<ssize_t>(bytes.size()), "enviar heartbeat suplantado");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        require(!has_heartbeat(manager, known_id),
+                "un heartbeat con NodeId conocido desde otro puerto se descarta");
+        close(wrong_source);
         send(bytes);
         require(wait_for([&] { return has_heartbeat(manager, known_id); }, 2000),
                 "un heartbeat valido se acepta despues de los malformados");

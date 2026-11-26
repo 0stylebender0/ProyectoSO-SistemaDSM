@@ -32,6 +32,9 @@ struct PageInfo {
     uint64_t version = 0;
     bool locally_present = false;
     std::set<NodeId> sharers;
+    // Proceso creador y orden de asignacion dentro del nodo (0 en copias remotas).
+    uint32_t creator_pid = 0;
+    uint64_t allocation_order = 0;
 };
 
 struct PageAssignment {
@@ -65,6 +68,8 @@ struct RegionInfo {
     RegionDescriptor descriptor;
     uint64_t first_page = 0;
     uint64_t page_count = 0;
+    uint32_t creator_pid = 0;
+    uint64_t allocation_order = 0;
 };
 
 using RegionTable = std::unordered_map<RegionId, RegionInfo>;

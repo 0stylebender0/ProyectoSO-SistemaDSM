@@ -27,6 +27,16 @@ namespace {
         }
     }
 
+    uint64_t load(const DSMRegion& region, std::size_t offset = 0) {
+        uint64_t value = 0;
+        require(region.read(offset, &value, sizeof(value)), "leer DSMRegion");
+        return value;
+    }
+
+    void store(DSMRegion& region, uint64_t value, std::size_t offset = 0) {
+        require(region.write(offset, &value, sizeof(value)), "escribir DSMRegion");
+    }
+
     bool transfer(int fd, void* buffer, std::size_t size, bool sending) {
         auto* bytes = static_cast<char*>(buffer);
         while (size) {
@@ -130,26 +140,29 @@ namespace {
                 DSM::last_error() == DSMError::INVALID_REGION,
                 "dueno invalido al descubrir regiones");
         auto copy = first;
-        void* address = first.data();
-        *first.as<volatile uint64_t>() = 123;
-        require(*first.as<volatile uint64_t>() == 123, "lectura y escritura locales");
-        require(DSM::attach_region(first.get_id(), self.id).data() == address, "adjuntar region local");
+        store(first, 123);
+        require(load(first) == 123, "lectura y escritura locales");
+        const auto attached = DSM::attach_region(first.get_id(), self.id);
+        require(attached.valid() && load(attached) == 123, "adjuntar region local");
         require(!DSM::attach_region(first.get_id(), self.id + 1).valid() &&
                 DSM::last_error() == DSMError::INVALID_REGION, "dueno incorrecto al adjuntar");
         require(DSM::get_statistics().pages_owned == 2, "estadisticas de regiones");
         require(DSM::release_region(first.get_id()) == DSMError::SUCCESS, "liberar region");
-        require(!copy.valid() && copy.data() == nullptr && !first.valid(), "invalidar copias del handle");
+        uint64_t discarded = 0;
+        require(!copy.valid() && !first.valid() && !copy.read(0, &discarded, sizeof(discarded)),
+                "invalidar copias del handle");
         require(DSM::get_regions().size() == 1 && DSM::get_remote_regions(self.id).size() == 1,
                 "la region liberada desaparece del descubrimiento");
         require(DSM::release_region(first.get_id()) == DSMError::INVALID_REGION, "doble liberacion");
         require(DSM::release_region(second.get_id()) == DSMError::SUCCESS, "liberar rango contiguo");
         auto whole = DSM::create_region(config.page_size * 8);
-        require(whole.valid() && whole.data() == address, "fusionar y reutilizar rangos libres");
-        require(*whole.as<volatile uint64_t>() == 0, "limpiar memoria reutilizada");
+        require(whole.valid(), "fusionar y reutilizar rangos libres");
+        require(load(whole) == 0, "limpiar memoria reutilizada");
         require(!DSM::create_region(1).valid() && DSM::last_error() == DSMError::OUT_OF_MEMORY,
                 "respetar memoria reservada");
         require(DSM::shutdown() == DSMError::SUCCESS, "shutdown con region activa");
-        require(!whole.valid() && whole.data() == nullptr, "shutdown invalida handles");
+        require(!whole.valid() && !whole.read(0, &discarded, sizeof(discarded)),
+                "shutdown invalida handles");
         require(DSM::shutdown() == DSMError::SUCCESS, "shutdown repetido");
         require(DSM::initialize(config.path) == DSMError::SUCCESS, "reinicializar");
         require(!whole.valid(), "un handle anterior no revive");
@@ -185,9 +198,9 @@ namespace {
             {
                 DSMThread nested;
                 require(nested.valid(), "guardia anidada");
-                *region.as<volatile uint64_t>() = 456;
+                store(region, 456);
             }
-            require(*region.as<volatile uint64_t>() == 456, "guardia externa sigue activa");
+            require(load(region) == 456, "guardia externa sigue activa");
             require(DSM::shutdown() == DSMError::INVALID_THREAD, "shutdown en otro hilo");
             std::unique_lock<std::mutex> lock(mutex);
             registered = true;
@@ -206,7 +219,7 @@ namespace {
             ready.notify_all();
         }
         thread.join();
-        require(*region.as<volatile uint64_t>() == 456, "escritura desde hilo registrado");
+        require(load(region) == 456, "escritura desde hilo registrado");
         require(DSM::shutdown() == DSMError::SUCCESS, "shutdown despues de reunir hilos");
         std::cout << "API y guardias de hilo: OK\n";
     }
@@ -239,12 +252,11 @@ namespace {
                     ready.fetch_add(1);
                     return;
                 }
-                auto* base = static_cast<volatile uint64_t*>(regions[i / pages_per_region].data());
-                const std::size_t offset = (i % pages_per_region) * words_per_page;
+                const std::size_t offset = (i % pages_per_region) * words_per_page * sizeof(uint64_t);
                 ready.fetch_add(1);
                 while (!go.load()) std::this_thread::yield();
-                base[offset] = 1000 + i;
-                if (base[offset] != 1000 + i) ++failures;
+                store(regions[i / pages_per_region], 1000 + i, offset);
+                if (load(regions[i / pages_per_region], offset) != 1000 + i) ++failures;
             });
         }
         while (ready.load() != thread_count) std::this_thread::yield();
@@ -253,9 +265,9 @@ namespace {
         require(failures.load() == 0, "escritura concurrente en varias paginas");
 
         for (unsigned i = 0; i < thread_count; ++i) {
-            auto* base = static_cast<volatile uint64_t*>(regions[i / pages_per_region].data());
-            const std::size_t offset = (i % pages_per_region) * words_per_page;
-            require(base[offset] == 1000 + i, "valor concurrente conservado");
+            const std::size_t offset = (i % pages_per_region) * words_per_page * sizeof(uint64_t);
+            require(load(regions[i / pages_per_region], offset) == 1000 + i,
+                    "valor concurrente conservado");
         }
         require(DSM::get_statistics().pages_owned == region_count * pages_per_region,
                 "estadisticas del estres");
@@ -277,19 +289,18 @@ namespace {
         require(DSM::initialize(config.path) == DSMError::SUCCESS, "initialize del dueno");
         auto region = DSM::create_region(config.page_size);
         require(region.valid(), "region del dueno");
-        *region.as<volatile uint64_t>() = 42;
+        store(region, 42);
         Reply reply{DSM::get_local_node().id, region.get_id(), 42};
         require(transfer(output, &reply, sizeof(reply), true), "publicar region");
         Operation op;
         while (transfer(input, &op, sizeof(op), false) && op != Operation::QUIT) {
             if (op == Operation::RECREATE) {
-                void* address = region.data();
                 require(DSM::release_region(region.get_id()) == DSMError::SUCCESS, "borrar region del dueno");
                 region = DSM::create_region(config.page_size);
-                require(region.valid() && region.data() == address, "reutilizar memoria del dueno");
+                require(region.valid() && load(region) == 0, "reutilizar memoria del dueno");
             }
             reply.region = region.get_id();
-            reply.value = *region.as<volatile uint64_t>();
+            reply.value = load(region);
             require(transfer(output, &reply, sizeof(reply), true), "responder desde dueno");
         }
         require(DSM::shutdown() == DSMError::SUCCESS, "shutdown del dueno");
@@ -326,22 +337,22 @@ namespace {
                 "descubrir la region remota con la API");
         auto remote = DSM::attach_region(discovered[0].id, discovered[0].owner_id);
         require(remote.valid(), "attach remoto");
-        require(*remote.as<volatile uint64_t>() == 42, "lectura remota bajo demanda");
-        *remote.as<volatile uint64_t>() = 99;
-        void* address = remote.data();
+        require(load(remote) == 42, "lectura remota bajo demanda");
+        store(remote, 99);
         auto copy = remote;
         require(DSM::release_region(remote.get_id()) == DSMError::SUCCESS, "devolver pagina M al liberar");
-        require(!copy.valid() && copy.data() == nullptr, "invalidar handle remoto");
+        uint64_t discarded = 0;
+        require(!copy.valid() && !copy.read(0, &discarded, sizeof(discarded)), "invalidar handle remoto");
         ask(Operation::READ);
         require(reply.value == 99, "dueno conserva escritura del nodo que libero");
         auto local = DSM::create_region(local_config.page_size);
-        require(local.valid() && local.data() == address, "reusar rango de region remota");
-        require(*local.as<volatile uint64_t>() == 0, "rango remoto reutilizado vacio");
+        require(local.valid(), "reusar rango de region remota");
+        require(load(local) == 0, "rango remoto reutilizado vacio");
         require(DSM::release_region(local.get_id()) == DSMError::SUCCESS, "liberar rango reutilizado");
 
         remote = DSM::attach_region(reply.region, reply.owner);
-        require(remote.valid() && *remote.as<volatile uint64_t>() == 99, "volver a adjuntar");
-        *remote.as<volatile uint64_t>() = 101;
+        require(remote.valid() && load(remote) == 99, "volver a adjuntar");
+        store(remote, 101);
         require(kill(child, SIGSTOP) == 0, "pausar dueno para probar timeout");
         int stopped;
         require(waitpid(child, &stopped, WUNTRACED) == child && WIFSTOPPED(stopped), "dueno detenido");
@@ -354,7 +365,7 @@ namespace {
         require(reply.value == 101, "write-back conservado tras timeout");
 
         remote = DSM::attach_region(reply.region, reply.owner);
-        require(remote.valid() && *remote.as<volatile uint64_t>() == 101, "copia S antes de borrar");
+        require(remote.valid() && load(remote) == 101, "copia S antes de borrar");
         const auto old_id = remote.get_id();
         ask(Operation::RECREATE);
         require(reply.region != old_id && reply.value == 0, "dueno borra y crea otra region limpia");
@@ -363,10 +374,16 @@ namespace {
                 DSM::last_error() == DSMError::NETWORK_ERROR,
                 "no volver a adjuntar una region eliminada");
         remote = DSM::attach_region(reply.region, reply.owner);
-        require(remote.valid() && *remote.as<volatile uint64_t>() == 0, "adjuntar nueva region");
-        *remote.as<volatile uint64_t>() = 777;
-        require(DSM::shutdown() == DSMError::SUCCESS, "shutdown devuelve paginas M remotas");
-        require(!remote.valid(), "shutdown invalida handle remoto");
+        require(remote.valid() && load(remote) == 0, "adjuntar nueva region");
+        store(remote, 777);
+        require(kill(child, SIGSTOP) == 0, "pausar dueno para probar shutdown");
+        require(waitpid(child, &stopped, WUNTRACED) == child && WIFSTOPPED(stopped), "dueno detenido");
+        require(DSM::shutdown() == DSMError::NETWORK_ERROR, "shutdown informa el write-back fallido");
+        require(remote.valid(), "shutdown fallido conserva el runtime para reintentar");
+        require(kill(child, SIGCONT) == 0, "reanudar dueno tras shutdown fallido");
+        require(DSM::shutdown() == DSMError::SUCCESS, "reintentar shutdown tras fallo de red");
+        require(!remote.valid() && !remote.read(0, &discarded, sizeof(discarded)),
+                "shutdown invalida handle remoto");
         ask(Operation::READ);
         require(reply.value == 777, "write-back durante shutdown");
         auto quit = Operation::QUIT;

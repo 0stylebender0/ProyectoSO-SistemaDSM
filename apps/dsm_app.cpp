@@ -44,19 +44,26 @@ int main(int argc, char** argv) {
                              DSM::attach_region(region_id, owner_id);
     if (!region.valid()) return fail();
 
-    auto* value = region.as<volatile uint64_t>();
+    auto load = [&]() -> uint64_t {
+        uint64_t value = 0;
+        if (!region.read(0, &value, sizeof(value))) fail();
+        return value;
+    };
+    auto store = [&](uint64_t value) {
+        if (!region.write(0, &value, sizeof(value))) fail();
+    };
     if (argc == 2) {
-        *value = 42;
+        store(42);
         std::cout << "Nodo: " << local.id << "\nRegion: " << region.get_id()
-                  << "\nValor inicial: " << *value
+                  << "\nValor inicial: " << load()
                   << "\nPuedes adjuntar esta region desde otra app. Enter para terminar.\n" << std::flush;
         std::string line;
         std::getline(std::cin, line);
-        std::cout << "Valor final: " << *value << '\n';
+        std::cout << "Valor final: " << load() << '\n';
     } else {
-        std::cout << "Valor remoto: " << *value << '\n';
-        *value = 43;
-        std::cout << "Nuevo valor: " << *value << '\n';
+        std::cout << "Valor remoto: " << load() << '\n';
+        store(43);
+        std::cout << "Nuevo valor: " << load() << '\n';
     }
     if (DSM::release_region(region.get_id()) != DSMError::SUCCESS) return fail();
     if (DSM::shutdown() != DSMError::SUCCESS) return fail();

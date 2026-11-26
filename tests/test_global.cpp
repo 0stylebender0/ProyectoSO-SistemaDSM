@@ -235,6 +235,9 @@ int main() {
             "STATUS_REQUEST con timeout");
     require(std::chrono::steady_clock::now() - before < std::chrono::seconds(1), "timeout acotado");
     close(stalled);
-    std::cout << "test_global: OK (totales, copias MSI, datos invalidos, parcial, desbordamiento y timeout)\n";
+    ConnectionHistory history;
+    for (int i = 0; i <= 1000; ++i) history.record(nodes.front(), HistoryEvent::NODE_DISCOVERED);
+    require(history.snapshot().size() == 1000, "el historial se conserva acotado");
+    std::cout << "test_global: OK (totales, copias MSI, datos invalidos, parcial, desbordamiento, timeout e historial)\n";
     return 0;
 }

@@ -107,6 +107,7 @@ private:
                    IODeadline deadline = IODeadline::max());
     void close_outgoing(int fd);
     NodeInfo local_node() const;
+    bool trusted_sender(int fd, NodeId sender, std::string& error) const;
     bool require_available(const NodeInfo& node, std::string& error) const;
 
     Config config_;

@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <new>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -20,6 +22,7 @@ namespace dsm_detail {
         DSMRegionId id;
         std::size_t size;
         void* address;
+        mutable std::shared_mutex mutex;
         std::atomic<bool> active{true};
         RegionState(DSMRegionId region_id, std::size_t length, void* base)
             : id(region_id), size(length), address(base) {}
@@ -36,6 +39,16 @@ namespace {
         return code;
     }
 
+    bool failed(DSMError code, std::string message) {
+        result(code, std::move(message));
+        return false;
+    }
+
+    bool succeeded() {
+        result(DSMError::SUCCESS);
+        return true;
+    }
+
     struct Runtime {
         Config config;
         std::thread::id owner = std::this_thread::get_id();
@@ -48,7 +61,12 @@ namespace {
         std::size_t registered_threads = 0;
         bool closed = false;
 
-        ~Runtime() { close(); }
+        ~Runtime() {
+            close();
+            // close() puede fallar y dejar la red activa: detenerla antes de destruir node.
+            if (network) network->stop();
+            if (faults) faults->stop();
+        }
 
         DSMError start(const std::string& path, std::string& error) {
             if (!load_config(path, config, error)) return DSMError::INITIALIZATION_ERROR;
@@ -67,7 +85,6 @@ namespace {
 
         DSMError close(std::string* error = nullptr) {
             if (closed) return DSMError::SUCCESS;
-            closed = true;
             DSMError code = DSMError::SUCCESS;
             if (node) {
                 auto entries = node->pager().region_snapshot();
@@ -76,6 +93,14 @@ namespace {
                            (b.descriptor.owner_id != node->pager().local_id());
                 });
                 for (const auto& entry : entries) {
+                    std::shared_ptr<dsm_detail::RegionState> state;
+                    {
+                        std::lock_guard<std::mutex> lock(regions_mutex);
+                        const auto found = regions.find(entry.descriptor.region_id);
+                        if (found != regions.end()) state = found->second;
+                    }
+                    std::unique_lock<std::shared_mutex> region_lock;
+                    if (state) region_lock = std::unique_lock<std::shared_mutex>(state->mutex);
                     std::string why;
                     if (!node->pager().release_region(entry.descriptor.region_id, why)) {
                         code = DSMError::NETWORK_ERROR;
@@ -83,6 +108,7 @@ namespace {
                     }
                 }
             }
+            if (code != DSMError::SUCCESS) return code;
             {
                 std::lock_guard<std::mutex> lock(regions_mutex);
                 for (const auto& region : regions) region.second->active = false;
@@ -90,7 +116,8 @@ namespace {
             }
             if (network) network->stop();
             if (faults) faults->stop();
-            return code;
+            closed = true;
+            return DSMError::SUCCESS;
         }
 
         std::shared_ptr<dsm_detail::RegionState> region_state(DSMRegionId id) {
@@ -166,8 +193,60 @@ DSMRegion::DSMRegion(std::shared_ptr<dsm_detail::RegionState> state) : state_(st
 DSMRegionId DSMRegion::get_id() const { return state_ ? state_->id : 0; }
 std::size_t DSMRegion::get_size() const { return state_ ? state_->size : 0; }
 bool DSMRegion::valid() const { return state_ && state_->active.load(); }
-void* DSMRegion::data() { return valid() ? state_->address : nullptr; }
-const void* DSMRegion::data() const { return valid() ? state_->address : nullptr; }
+
+bool DSMRegion::read(std::size_t offset, void* buffer, std::size_t size) const {
+    if (!state_) return failed(DSMError::INVALID_REGION, "region no inicializada");
+    if (size > state_->size || offset > state_->size - size || (size != 0 && buffer == nullptr)) {
+        return failed(DSMError::INVALID_REGION, "rango de lectura fuera de la region");
+    }
+    FaultAccess access;
+    if (!begin_fault_access(access)) {
+        return failed(DSMError::PAGE_FAULT_ERROR, "ya hay un acceso DSM activo en este hilo");
+    }
+    state_->mutex.lock_shared();
+    if (sigsetjmp(access.jump, 1) != 0) {
+        state_->mutex.unlock_shared();
+        const std::string why = access.message();
+        end_fault_access();
+        return failed(DSMError::PAGE_FAULT_ERROR, why);
+    }
+    if (!state_->active.load()) {
+        state_->mutex.unlock_shared();
+        end_fault_access();
+        return failed(DSMError::INVALID_REGION, "region liberada");
+    }
+    std::memcpy(buffer, static_cast<const char*>(state_->address) + offset, size);
+    state_->mutex.unlock_shared();
+    end_fault_access();
+    return succeeded();
+}
+
+bool DSMRegion::write(std::size_t offset, const void* buffer, std::size_t size) {
+    if (!state_) return failed(DSMError::INVALID_REGION, "region no inicializada");
+    if (size > state_->size || offset > state_->size - size || (size != 0 && buffer == nullptr)) {
+        return failed(DSMError::INVALID_REGION, "rango de escritura fuera de la region");
+    }
+    FaultAccess access;
+    if (!begin_fault_access(access)) {
+        return failed(DSMError::PAGE_FAULT_ERROR, "ya hay un acceso DSM activo en este hilo");
+    }
+    state_->mutex.lock_shared();
+    if (sigsetjmp(access.jump, 1) != 0) {
+        state_->mutex.unlock_shared();
+        const std::string why = access.message();
+        end_fault_access();
+        return failed(DSMError::PAGE_FAULT_ERROR, why);
+    }
+    if (!state_->active.load()) {
+        state_->mutex.unlock_shared();
+        end_fault_access();
+        return failed(DSMError::INVALID_REGION, "region liberada");
+    }
+    std::memcpy(static_cast<char*>(state_->address) + offset, buffer, size);
+    state_->mutex.unlock_shared();
+    end_fault_access();
+    return succeeded();
+}
 
 struct DSMThread::Impl { std::shared_ptr<Registration> registration; };
 
@@ -280,6 +359,14 @@ DSMError DSM::release_region(DSMRegionId id) {
     if (!call.runtime->node->pager().region_info(id, info)) {
         return result(DSMError::INVALID_REGION, "region desconocida o liberada");
     }
+    std::shared_ptr<dsm_detail::RegionState> state;
+    {
+        std::lock_guard<std::mutex> lookup(call.runtime->regions_mutex);
+        const auto found = call.runtime->regions.find(id);
+        if (found != call.runtime->regions.end()) state = found->second;
+    }
+    std::unique_lock<std::shared_mutex> region_lock;
+    if (state) region_lock = std::unique_lock<std::shared_mutex>(state->mutex);
     std::string error;
     if (!call.runtime->node->pager().release_region(id, error)) {
         return result(error == "region en uso" || error == "region en liberacion" ?
@@ -321,6 +408,7 @@ DSMError DSM::shutdown() {
     const auto code = current->close(&error);
     {
         std::lock_guard<std::mutex> lock(api_mutex);
+        if (code != DSMError::SUCCESS) instance = std::move(current);
         lifecycle_busy = false;
     }
     return result(code, error);

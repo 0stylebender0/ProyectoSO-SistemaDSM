@@ -49,17 +49,18 @@ namespace {
             error = "bootstrap debe tener el formato host:puerto";
             return false;
         }
-        uint32_t value = 0;
+        uint64_t value = 0;
         for (std::size_t i = colon + 1; i < text.size(); ++i) {
             if (text[i] < '0' || text[i] > '9') {
                 error = "puerto bootstrap invalido";
                 return false;
             }
-            value = value * 10 + static_cast<uint32_t>(text[i] - '0');
-            if (value > 65535) {
+            const uint64_t digit = static_cast<uint64_t>(text[i] - '0');
+            if (value > (65535 - digit) / 10) {
                 error = "puerto bootstrap fuera de rango";
                 return false;
             }
+            value = value * 10 + digit;
         }
         if (value == 0) {
             error = "puerto bootstrap fuera de rango";
@@ -209,9 +210,26 @@ bool NetworkManager::start(std::string& error) {
         return false;
     }
     listener_started_ = true;
-    if (!config_.bootstrap_nodes.empty() && !join(config_.bootstrap_nodes, error)) {
-        stop();
-        return false;
+    std::string seeds = config_.bootstrap_nodes;
+    for (const auto& address : config_.node_addresses) {
+        if (!seeds.empty()) seeds += ",";
+        seeds += address;
+    }
+    if (!seeds.empty()) {
+        std::size_t begin = 0;
+        bool joined = false;
+        while (!joined && begin <= seeds.size()) {
+            const std::size_t comma = seeds.find(',', begin);
+            const std::string seed = seeds.substr(
+                begin, comma == std::string::npos ? std::string::npos : comma - begin);
+            if (!seed.empty()) joined = join(seed, error);
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        if (!joined) {
+            stop();
+            return false;
+        }
     }
     return true;
 }
@@ -356,7 +374,7 @@ bool NetworkManager::handle_connection(int fd) {
             continue;
         }
         if (request.type == static_cast<uint16_t>(MessageType::NODE_LEAVE)) {
-            if (!payload.empty() || request.sender_id == 0 || request.sender_id == node_id_) {
+            if (!payload.empty() || !trusted_sender(fd, request.sender_id, error)) {
                 if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
@@ -370,7 +388,8 @@ bool NetworkManager::handle_connection(int fd) {
         if (request.type == static_cast<uint16_t>(MessageType::NODE_ANNOUNCE)) {
             std::vector<NodeInfo> announced;
             bool inserted = false;
-            if (!deserialize_nodes(payload, announced, error) || announced.size() != 1) {
+            if (!trusted_sender(fd, request.sender_id, error) ||
+                !deserialize_nodes(payload, announced, error) || announced.size() != 1) {
                 if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
             } else if (announced[0].page_size != config_.page_size) {
                 if (!send_error(fd, request, ErrorCode::PROTOCOL_MISMATCH, error)) return false;
@@ -385,7 +404,8 @@ bool NetworkManager::handle_connection(int fd) {
         }
         if (request.type == static_cast<uint16_t>(MessageType::INVALIDATE)) {
             InvalidateMessage message;
-            if (request.sender_id == 0 || !deserialize_invalidate(payload, message, error)) {
+            if (!trusted_sender(fd, request.sender_id, error) ||
+                !deserialize_invalidate(payload, message, error)) {
                 if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
@@ -411,7 +431,8 @@ bool NetworkManager::handle_connection(int fd) {
         }
         if (request.type == static_cast<uint16_t>(MessageType::PAGE_RELEASE)) {
             PageData data;
-            if (request.sender_id == 0 || !deserialize_page_data(payload, data, error)) {
+            if (!trusted_sender(fd, request.sender_id, error) ||
+                !deserialize_page_data(payload, data, error)) {
                 if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
             }
@@ -424,7 +445,7 @@ bool NetworkManager::handle_connection(int fd) {
         }
         if (request.type == static_cast<uint16_t>(MessageType::PAGE_REQUEST)) {
             PageRequest page_request;
-            if (request.sender_id == 0 ||
+            if (!trusted_sender(fd, request.sender_id, error) ||
                 !deserialize_page_request(payload, page_request, error)) {
                 if (!send_error(fd, request, ErrorCode::INVALID_MESSAGE, error)) return false;
                 continue;
@@ -621,6 +642,21 @@ std::vector<NodeInfo> NetworkManager::active_nodes() const {
 
 uint16_t NetworkManager::heartbeat_port() const {
     return heartbeat_ ? heartbeat_->port() : config_.heartbeat_port;
+}
+
+bool NetworkManager::trusted_sender(int fd, NodeId sender, std::string& error) const {
+    NodeInfo peer;
+    if (sender == 0 || sender == node_id_ || !node_table_.find(sender, peer)) {
+        error = "remitente desconocido: " + std::to_string(sender);
+        return false;
+    }
+    std::string address;
+    if (!socket_address(fd, false, address, error)) return false;
+    if (address != peer.ip_address) {
+        error = "la direccion TCP no corresponde al remitente " + std::to_string(sender);
+        return false;
+    }
+    return true;
 }
 
 bool NetworkManager::require_available(const NodeInfo& node, std::string& error) const {

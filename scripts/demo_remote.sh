@@ -8,9 +8,9 @@ template="$project_dir/config/remote-node.conf.template"
 name=""
 bind_address=""
 bootstrap=""
+node_addresses=""
 tcp_port=27400
 heartbeat_port=""
-control_port=""
 nodes=3
 peers=2
 regions=1
@@ -31,9 +31,10 @@ omite --bootstrap.
   --name <nombre>          Nombre del nodo (obligatorio)
   --bind <IPv4>            IP de esta maquina alcanzable por los demas (obligatorio)
   --bootstrap <host:puerto> Nodo semilla; vacio en el primer nodo
+  --node-addresses <lista>  Participantes host:puerto separados por coma
+                            (default: el bootstrap)
   --tcp-port <n>           Puerto TCP (default 27400)
   --heartbeat-port <n>     Puerto UDP; 0 = efimero (default tcp+1)
-  --control-port <n>       Puerto reservado de control (default tcp+2)
   --nodes <n>              Participantes totales esperados (default 3)
   --peers <n>              Pares con regiones que se deben verificar (default 2)
   --regions <n>            Regiones propias; 0 para observador (default 1)
@@ -66,9 +67,9 @@ while (($#)); do
         --name) require_value "$@"; name=$2; shift 2 ;;
         --bind) require_value "$@"; bind_address=$2; shift 2 ;;
         --bootstrap) require_value "$@"; bootstrap=$2; shift 2 ;;
+        --node-addresses) require_value "$@"; node_addresses=$2; shift 2 ;;
         --tcp-port) require_value "$@"; tcp_port=$2; shift 2 ;;
         --heartbeat-port) require_value "$@"; heartbeat_port=$2; shift 2 ;;
-        --control-port) require_value "$@"; control_port=$2; shift 2 ;;
         --nodes) require_value "$@"; nodes=$2; shift 2 ;;
         --peers) require_value "$@"; peers=$2; shift 2 ;;
         --regions) require_value "$@"; regions=$2; shift 2 ;;
@@ -112,15 +113,10 @@ fi
 if [[ -z $heartbeat_port ]]; then
     heartbeat_port=$((10#$tcp_port + 1))
 fi
-if [[ -z $control_port ]]; then
-    control_port=$((10#$tcp_port + 2))
+if ! [[ $heartbeat_port =~ ^[0-9]+$ ]] || ((10#$heartbeat_port < 0 || 10#$heartbeat_port > 65535)); then
+    echo "Puerto fuera de rango: $heartbeat_port" >&2
+    exit 1
 fi
-for value in "$heartbeat_port" "$control_port"; do
-    if ! [[ $value =~ ^[0-9]+$ ]] || ((10#$value < 0 || 10#$value > 65535)); then
-        echo "Puerto fuera de rango: $value" >&2
-        exit 1
-    fi
-done
 if ((10#$nodes < 1 || 10#$peers < 0 || 10#$regions < 0 ||
      10#$pages < 1 || 10#$threads < 1)); then
     echo "Los valores de nodos, pares, regiones, paginas e hilos no son validos" >&2
@@ -129,6 +125,9 @@ fi
 if [[ -n $bootstrap ]] && ! [[ $bootstrap =~ ^[A-Za-z0-9._-]+:[0-9]+$ ]]; then
     echo "bootstrap debe tener el formato host:puerto: $bootstrap" >&2
     exit 1
+fi
+if [[ -z $node_addresses ]]; then
+    node_addresses=$bootstrap
 fi
 if [[ ! -x $validate_binary ]]; then
     echo "No se encontro dsm_validate: $validate_binary" >&2
@@ -154,12 +153,12 @@ sed \
     -e "s|@BIND_ADDRESS@|$bind_address|g" \
     -e "s|@TCP_PORT@|$tcp_port|g" \
     -e "s|@HEARTBEAT_PORT@|$heartbeat_port|g" \
-    -e "s|@CONTROL_PORT@|$control_port|g" \
     -e "s|@BOOTSTRAP_NODES@|$bootstrap|g" \
+    -e "s|@NODE_ADDRESSES@|$node_addresses|g" \
     "$template" > "$config_out"
 
-printf 'Nodo %s: tcp=%s heartbeat_udp=%s control=%s\n' \
-    "$name" "$tcp_port" "$heartbeat_port" "$control_port"
+printf 'Nodo %s: tcp=%s heartbeat_udp=%s\n' \
+    "$name" "$tcp_port" "$heartbeat_port"
 if [[ -n $bootstrap ]]; then
     printf 'Semilla: %s\n' "$bootstrap"
 else

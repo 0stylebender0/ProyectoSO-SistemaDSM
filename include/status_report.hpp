@@ -94,6 +94,8 @@ inline std::string pages(const Pager& pager) {
             << ",state=" << msi_state_name(page.state)
             << ",present=" << (page.locally_present ? "si" : "no")
             << ",version=" << page.version
+            << ",pid=" << page.creator_pid
+            << ",order=" << page.allocation_order
             << ",sharers=";
         bool first = true;
         for (NodeId sharer : page.sharers) {

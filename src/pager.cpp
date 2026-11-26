@@ -2,11 +2,13 @@
 
 #include <sys/mman.h>
 #include <sys/random.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace {
@@ -35,6 +37,26 @@ namespace {
         return true;
     }
 
+    // Las tablas se protegen con semaforo POSIX ademas del mutex; el semaforo
+    // se libera siempre, incluso si una excepcion aborta la operacion.
+    class TableGuard {
+    public:
+        TableGuard(std::mutex& mutex, sem_t& semaphore) : mutex_(mutex), semaphore_(semaphore) {
+            if (sem_wait(&semaphore_) == -1) throw std::runtime_error("sem_wait de tablas fallo");
+            mutex_.lock();
+        }
+        ~TableGuard() {
+            mutex_.unlock();
+            sem_post(&semaphore_);
+        }
+        TableGuard(const TableGuard&) = delete;
+        TableGuard& operator=(const TableGuard&) = delete;
+
+    private:
+        std::mutex& mutex_;
+        sem_t& semaphore_;
+    };
+
     bool same_descriptor(const RegionDescriptor& a, const RegionDescriptor& b) {
         return a.region_id == b.region_id && a.owner_id == b.owner_id &&
                a.size == b.size && a.page_size == b.page_size;
@@ -43,7 +65,14 @@ namespace {
 
 Pager::Pager(MemoryManager& memory, NodeId local_id, uint32_t timeout_ms)
     : memory_(memory), local_id_(local_id), timeout_ms_(timeout_ms) {
+    if (sem_init(&table_semaphore_, 0, 1) == -1) {
+        throw std::runtime_error(std::string("sem_init de tablas fallo: ") + std::strerror(errno));
+    }
     if (memory_.page_count()) free_ranges_.emplace(0, memory_.page_count());
+}
+
+Pager::~Pager() {
+    sem_destroy(&table_semaphore_);
 }
 
 void Pager::set_page_fetcher(PageFetcher fetcher) {
@@ -77,7 +106,7 @@ bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error
 
     const uint64_t rounded = round_up(size, page_size);
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
 
     RegionId id = 0;
     bool unique = false;
@@ -100,6 +129,9 @@ bool Pager::create_region(uint64_t size, RegionId& region_id, std::string& error
     descriptor.page_size = static_cast<uint32_t>(page_size);
 
     if (!allocate_locked(descriptor, error)) return false;
+    RegionInfo& created = regions_.at(id);
+    created.creator_pid = static_cast<uint32_t>(getpid());
+    created.allocation_order = ++next_allocation_order_;
     region_id = id;
     return true;
 }
@@ -122,7 +154,7 @@ bool Pager::attach_region(const RegionDescriptor& descriptor, std::string& error
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
 
     const auto found = regions_.find(descriptor.region_id);
     if (found != regions_.end()) {
@@ -154,7 +186,7 @@ bool Pager::release_region(RegionId id, std::string& error) {
     RegionInfo region;
     std::vector<std::shared_ptr<PageEntry>> entries;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        TableGuard lock(mutex_, table_semaphore_);
         const auto found = regions_.find(id);
         if (found == regions_.end()) { error = "region desconocida"; return false; }
         if (!releasing_.insert(id).second) { error = "region en liberacion"; return false; }
@@ -167,7 +199,7 @@ bool Pager::release_region(RegionId id, std::string& error) {
             entry->releasing = false;
             entry->retired = false;
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        TableGuard lock(mutex_, table_semaphore_);
         releasing_.erase(id);
         return false;
     };
@@ -230,7 +262,7 @@ bool Pager::release_region(RegionId id, std::string& error) {
         entry->retired = true;
     }
     if (!memory_.reset_pages(region.first_page, region.page_count, error)) return rollback();
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
     for (uint64_t i = 0; i < region.page_count; ++i) pages_.erase(region.first_page + i);
     regions_.erase(id);
     releasing_.erase(id);
@@ -300,6 +332,8 @@ bool Pager::attach_locked(const RegionDescriptor& descriptor, uint64_t first_pag
         page.state = MSIState::INVALID;
         page.version = 0;
         page.locally_present = false;
+        page.creator_pid = region.creator_pid;
+        page.allocation_order = region.allocation_order;
 
         auto entry = std::make_shared<PageEntry>();
         entry->page = page;
@@ -323,13 +357,13 @@ bool Pager::attach_locked(const RegionDescriptor& descriptor, uint64_t first_pag
 }
 
 std::shared_ptr<Pager::PageEntry> Pager::find_page(PageId page_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
     const auto found = pages_.find(page_id);
     return found == pages_.end() ? nullptr : found->second;
 }
 
 std::shared_ptr<Pager::PageEntry> Pager::find_region_page(RegionId id, uint64_t offset) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
     const auto region = regions_.find(id);
     if (region == regions_.end() || offset >= region->second.page_count) return nullptr;
     return pages_.at(region->second.first_page + offset);
@@ -649,7 +683,7 @@ bool Pager::page_info(PageId page_id, PageInfo& out) const {
 std::vector<PageInfo> Pager::page_snapshot() const {
     std::vector<std::shared_ptr<PageEntry>> entries;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        TableGuard lock(mutex_, table_semaphore_);
         for (const auto& entry : pages_) entries.push_back(entry.second);
     }
     std::vector<PageInfo> result;
@@ -662,7 +696,7 @@ std::vector<PageInfo> Pager::page_snapshot() const {
 }
 
 bool Pager::region_info(RegionId region_id, RegionInfo& out) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
     const auto found = regions_.find(region_id);
     if (found == regions_.end()) return false;
     out = found->second;
@@ -670,7 +704,7 @@ bool Pager::region_info(RegionId region_id, RegionInfo& out) const {
 }
 
 std::vector<RegionInfo> Pager::region_snapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    TableGuard lock(mutex_, table_semaphore_);
     std::vector<RegionInfo> result;
     result.reserve(regions_.size());
     for (const auto& entry : regions_) result.push_back(entry.second);

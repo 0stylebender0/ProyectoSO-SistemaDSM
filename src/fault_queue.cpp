@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -25,6 +26,12 @@ bool FaultQueue::open(std::string& error) {
     }
     read_fd_ = fds[0];
     write_fd_ = fds[1];
+    const int flags = fcntl(write_fd_, F_GETFL);
+    if (flags == -1 || fcntl(write_fd_, F_SETFL, flags | O_NONBLOCK) == -1) {
+        error = std::string("no se pudo configurar la cola de fallos: ") + std::strerror(errno);
+        close();
+        return false;
+    }
     return true;
 }
 
@@ -40,7 +47,8 @@ bool FaultQueue::push(const FaultEvent& event) const {
     ssize_t count;
     do {
         count = write(write_fd_, &event, sizeof(event));
-    } while (count == -1 && errno == EINTR);
+        if (count == -1 && errno == EAGAIN) sched_yield();
+    } while (count == -1 && (errno == EINTR || errno == EAGAIN));
     return count == sizeof(event);
 }
 

@@ -484,7 +484,7 @@ namespace {
                     "el dueno conserva la pagina " + std::to_string(i));
         }
         require(a.pager().statistics().pages_owned == pages, "paginas propias del dueno");
-        require(a.pager().statistics().page_transfers > 0, "hubo transferencias de pagina");
+        require(b.pager().statistics().page_transfers >= pages, "hubo transferencias de pagina");
         require(a.pager().release_region(region, error), error);
         require(a.pager().region_snapshot().empty(), "el dueno libera la region de estres");
 

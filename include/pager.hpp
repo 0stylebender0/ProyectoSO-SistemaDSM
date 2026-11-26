@@ -5,6 +5,8 @@
 #include "protocol.hpp"
 #include "statistics.hpp"
 
+#include <semaphore.h>
+
 #include <functional>
 #include <condition_variable>
 #include <mutex>
@@ -32,6 +34,7 @@ using PageReleaser = std::function<bool(NodeId, const PageData&, std::string&)>;
 class Pager {
 public:
     Pager(MemoryManager& memory, NodeId local_id, uint32_t timeout_ms = 5000);
+    ~Pager();
 
     Pager(const Pager&) = delete;
     Pager& operator=(const Pager&) = delete;
@@ -110,9 +113,11 @@ private:
     PageReleaser releaser_;
     uint32_t timeout_ms_;
 
-    // El mutex de tablas se libera antes de tomar el de una pagina.
-    // Ningun mutex del Pager se mantiene durante llamadas de red.
+    // El semaforo POSIX y el mutex se toman siempre en ese orden; ninguno se
+    // mantiene durante llamadas de red ni al tomar el mutex de una pagina.
     mutable std::mutex mutex_;
+    mutable sem_t table_semaphore_;
+    uint64_t next_allocation_order_ = 0;
     std::unordered_map<PageId, std::shared_ptr<PageEntry>> pages_;
     RegionTable regions_;
     std::set<RegionId> releasing_;

@@ -3,8 +3,10 @@
 #include "fault_queue.hpp"
 
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -12,6 +14,22 @@
 #include <vector>
 
 using FaultCallback = std::function<bool(PageId, bool, std::string&)>;
+
+// Contexto de un acceso DSM: permite abandonar la copia si el worker no puede
+// resolver la pagina, sin terminar el proceso.
+struct FaultAccess {
+    sigjmp_buf jump{};
+    std::atomic<bool> failed{false};
+    char error[256]{};
+    pid_t tid = 0;
+
+    bool has_failed() const;
+    const char* message() const;
+    void fail(const std::string& why);
+};
+
+bool begin_fault_access(FaultAccess& access);
+void end_fault_access();
 
 // Se prepara y destruye en el mismo hilo que accede a la memoria DSM.
 class FaultThread {
@@ -63,6 +81,8 @@ private:
     struct sigaction previous_usr1_{};
     std::vector<pthread_t> workers_;
     std::size_t worker_count_;
+    std::atomic<unsigned> in_flight_{0};
+    std::atomic<bool> stopping_{false};
     pid_t pid_ = 0;
     bool segv_installed_ = false;
     bool usr1_installed_ = false;

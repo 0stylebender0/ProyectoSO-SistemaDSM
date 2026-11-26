@@ -15,11 +15,13 @@ tcp_port=@TCP_PORT@
 # UDP del heartbeat. Puede ser 0 para que el SO asigne uno efimero, pero
 # en un cluster conviene fijarlo y abrirlo en el firewall.
 heartbeat_port=@HEARTBEAT_PORT@
-control_port=@CONTROL_PORT@
 
 [discovery]
 # IP:puerto TCP del nodo semilla. En el primer nodo puede quedar vacio.
 bootstrap_nodes=@BOOTSTRAP_NODES@
+# Todas las maquinas participantes, separadas por coma, con su puerto TCP.
+# Se prueban como semillas en orden hasta que una incorpore al nodo.
+node_addresses=@NODE_ADDRESSES@
 
 [heartbeat]
 interval_ms=1000
@@ -30,5 +32,4 @@ worker_count=4
 max_connections=64
 
 [paging]
-max_pending_faults=1024
 request_timeout_ms=5000

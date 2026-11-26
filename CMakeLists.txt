@@ -52,6 +52,14 @@ add_executable(dsm_validate apps/dsm_validate.cpp)
 target_compile_options(dsm_validate PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(dsm_validate PRIVATE dsm)
 
+add_executable(dsm_array apps/dsm_array.cpp)
+target_compile_options(dsm_array PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm_array PRIVATE dsm)
+
+add_executable(dsm_matrix apps/dsm_matrix.cpp)
+target_compile_options(dsm_matrix PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dsm_matrix PRIVATE dsm)
+
 enable_testing()
 
 add_executable(test_api tests/test_api.cpp)
@@ -188,6 +196,12 @@ if(Python3_Interpreter_FOUND)
         "$<TARGET_FILE:dsm_validate>"
     )
     set_tests_properties(validation PROPERTIES TIMEOUT 60)
+
+    add_test(NAME apps COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/tests/test_apps.py"
+        "$<TARGET_FILE:dsm_array>" "$<TARGET_FILE:dsm_matrix>"
+    )
+    set_tests_properties(apps PROPERTIES TIMEOUT 60)
 endif()
 
 add_test(NAME final_demo COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/demo_final.sh")

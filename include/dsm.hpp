@@ -64,12 +64,10 @@ public:
     DSMRegion() = default;
     DSMRegionId get_id() const;
     std::size_t get_size() const;
-    void* data();
-    const void* data() const;
+    // Copias acotadas: mantienen el handle protegido frente a release_region.
+    bool read(std::size_t offset, void* buffer, std::size_t size) const;
+    bool write(std::size_t offset, const void* buffer, std::size_t size);
     bool valid() const;
-
-    template <typename T> T* as() { return static_cast<T*>(data()); }
-    template <typename T> const T* as() const { return static_cast<const T*>(data()); }
 
 private:
     friend class DSM;

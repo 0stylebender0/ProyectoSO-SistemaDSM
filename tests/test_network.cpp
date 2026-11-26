@@ -42,6 +42,18 @@ int connect_to(uint16_t port) {
     return fd;
 }
 
+NodeInfo sample_node(NodeId id) {
+    NodeInfo node;
+    node.id = id;
+    node.node_name = "forastero";
+    node.ip_address = "127.0.0.1";
+    node.tcp_port = 1;
+    node.heartbeat_port = 2;
+    node.memory_size = 4096;
+    node.page_size = 4096;
+    return node;
+}
+
 MessageHeader status_request(uint64_t message_id) {
     MessageHeader header{};
     header.magic = DSM_MAGIC;
@@ -134,7 +146,82 @@ bool malformed_requests(int fd, std::string& error) {
     expect(MessageType::REGION_LIST_REQUEST, 216, {},
            ErrorCode::PAGE_NOT_FOUND, "REGION_LIST_REQUEST sin manejador");
     expect(MessageType::PAGE_REQUEST, 217, std::vector<uint8_t>(34),
-           ErrorCode::PAGE_NOT_FOUND, "PAGE_REQUEST sin manejador");
+           ErrorCode::INVALID_MESSAGE, "PAGE_REQUEST de remitente desconocido");
+    std::vector<uint8_t> announcement;
+    if (!serialize_nodes({sample_node(999)}, announcement, error)) {
+        std::cerr << "FALLO: serializar anuncio (" << error << ")\n";
+        return false;
+    }
+    expect(MessageType::NODE_ANNOUNCE, 218, announcement,
+           ErrorCode::INVALID_MESSAGE, "NODE_ANNOUNCE con anunciador desconocido");
+    expect(MessageType::NODE_LEAVE, 219, {},
+           ErrorCode::INVALID_MESSAGE, "NODE_LEAVE de remitente desconocido");
+    return ok;
+}
+
+bool register_sender(int fd, NodeId id, std::string& error) {
+    std::vector<uint8_t> payload;
+    MessageHeader request = status_request(300);
+    request.type = static_cast<uint16_t>(MessageType::JOIN_REQUEST);
+    request.sender_id = id;
+    MessageHeader response{};
+    std::vector<uint8_t> reply;
+    return serialize_nodes({sample_node(id)}, payload, error) &&
+           send_message(fd, request, payload, error) &&
+           recv_message(fd, response, reply, error) &&
+           response.type == static_cast<uint16_t>(MessageType::JOIN_RESPONSE) &&
+           recv_message(fd, response, reply, error) &&
+           response.type == static_cast<uint16_t>(MessageType::NODE_LIST_RESPONSE);
+}
+
+bool has_node(const std::vector<NodeInfo>& nodes, NodeId id) {
+    for (const auto& node : nodes) {
+        if (node.id == id) return true;
+    }
+    return false;
+}
+
+bool sender_checks(int fd, NetworkManager& network, std::string& error) {
+    NodeId known = 42;
+    NodeId forged = 43;
+    if (!register_sender(fd, known, error)) {
+        std::cerr << "FALLO: registrar remitente de prueba (" << error << ")\n";
+        return false;
+    }
+    bool ok = true;
+    auto expect = [&](uint64_t id, MessageType type, NodeId sender,
+                      const std::vector<uint8_t>& payload, ErrorCode code, const char* message) {
+        MessageHeader request = status_request(id);
+        request.type = static_cast<uint16_t>(type);
+        request.sender_id = sender;
+        if (!request_error(fd, request, payload, code, error)) {
+            std::cerr << "FALLO: " << message << " (" << error << ")\n";
+            ok = false;
+        }
+    };
+    std::vector<uint8_t> announcement;
+    if (!serialize_nodes({sample_node(999)}, announcement, error)) return false;
+    expect(301, MessageType::NODE_ANNOUNCE, forged, announcement,
+           ErrorCode::INVALID_MESSAGE, "NODE_ANNOUNCE suplantado");
+    check(!has_node(network.nodes(), 999), "el anuncio suplantado no registra al nodo");
+    expect(302, MessageType::NODE_LEAVE, forged, {},
+           ErrorCode::INVALID_MESSAGE, "NODE_LEAVE suplantado");
+    check(has_node(network.nodes(), known), "NODE_LEAVE suplantado no elimina al nodo");
+
+    std::vector<uint8_t> third_party;
+    if (!serialize_nodes({sample_node(999)}, third_party, error)) return false;
+    MessageHeader request = status_request(303);
+    request.type = static_cast<uint16_t>(MessageType::NODE_ANNOUNCE);
+    request.sender_id = known;
+    if (!send_message(fd, request, third_party, error)) {
+        std::cerr << "FALLO: anuncio de tercero (" << error << ")\n";
+        ok = false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!has_node(network.nodes(), 999) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(has_node(network.nodes(), 999), "un remitente conocido puede anunciar a otro");
     return ok;
 }
 
@@ -164,6 +251,12 @@ int main() {
         check(query_status(fd, port, node_id, 2), "reutilizar la misma conexion");
         check(malformed_requests(fd, error), "mensajes malformados con ERROR_RESPONSE");
         check(query_status(fd, port, node_id, 3), "conexion util tras mensajes malformados");
+        check(sender_checks(fd, network, error), "validacion del remitente");
+        check(query_status(fd, port, node_id, 4), "conexion util tras suplantaciones");
+        std::string bootstrap_error;
+        check(!network.join("127.0.0.1:999999999999999999999999999999", bootstrap_error) &&
+              bootstrap_error.find("fuera de rango") != std::string::npos,
+              "rechazar bootstrap con puerto desbordado");
 
         MessageHeader unsupported = status_request(3);
         unsupported.type = 65535;

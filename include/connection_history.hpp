@@ -38,6 +38,9 @@ public:
         const auto now = std::chrono::system_clock::now().time_since_epoch();
         entries_.push_back({node, static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(now).count()), event});
+        if (entries_.size() > 1000) {
+            entries_.erase(entries_.begin(), entries_.end() - 1000);
+        }
     }
 
     std::vector<HistoryEntry> snapshot() const {

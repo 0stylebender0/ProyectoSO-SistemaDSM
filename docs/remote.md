@@ -38,7 +38,10 @@ Puertos de la plantilla:
 |---|---|---|
 | 27400 | TCP | Descubrimiento, páginas, estado y consultas globales. |
 | 27401 | UDP | Heartbeat de disponibilidad. |
-| 27402 | TCP | Reservado para control; esta entrega no abre un socket en ese puerto. |
+
+No hay un puerto de control separado: los mensajes de control (JOIN,
+NODE_ANNOUNCE, INVALIDATE, STATUS, etc.) y las transferencias de página
+comparten `tcp_port`. Abra solamente los dos puertos de la tabla.
 
 El nodo que recibe conexiones necesita TCP de entrada en `tcp_port`. Todos los
 nodos necesitan UDP de entrada en `heartbeat_port` para que los demás detecten
@@ -62,13 +65,13 @@ sudo iptables -A INPUT -p tcp --dport 27400 -j ACCEPT
 sudo iptables -A INPUT -p udp --dport 27401 -j ACCEPT
 ```
 
-Si cambia `--tcp-port`, también cambian por defecto `heartbeat_port` y
-`control_port` (`tcp+1` y `tcp+2`). Abra los puertos correspondientes.
+Si cambia `--tcp-port`, también cambia por defecto `heartbeat_port` (`tcp+1`).
+Abra el puerto UDP correspondiente.
 
 Compruebe antes de arrancar:
 
 ```sh
-ss -lntup | grep -E '27400|27401|27402'
+ss -lntup | grep -E '27400|27401'
 ping -c 1 192.168.1.10
 ```
 
@@ -86,10 +89,10 @@ page_size=4096
 bind_address=@BIND_ADDRESS@
 tcp_port=@TCP_PORT@
 heartbeat_port=@HEARTBEAT_PORT@
-control_port=@CONTROL_PORT@
 
 [discovery]
 bootstrap_nodes=@BOOTSTRAP_NODES@
+node_addresses=@NODE_ADDRESSES@
 
 [heartbeat]
 interval_ms=1000
@@ -103,6 +106,11 @@ Reglas importantes:
   `127.0.0.1` y los demás no podrían conectarse de vuelta.
 - `bootstrap_nodes` lleva `IP:puerto_TCP` del nodo semilla. En el primer nodo
   queda vacío.
+- `node_addresses` enumera todos los participantes (`IP:puerto_TCP`, separados
+  por coma). Se prueban en orden como semillas junto con `bootstrap_nodes`: si
+  la semilla elegida está caída, el nodo puede incorporarse por otra dirección.
+  `scripts/demo_remote.sh --node-addresses` rellena este valor; si se omite,
+  usa `--bootstrap`.
 - `page_size` debe ser igual en todos los nodos.
 - `heartbeat_port=0` pide un puerto UDP efímero. Funciona, pero complica el
   firewall; en el cluster fije 27401.
@@ -142,6 +150,7 @@ Opciones útiles:
 --peers 2              # pares con regiones a verificar
 --regions 0            # observador, no crea datos
 --hold-ms 60000        # mantener el nodo vivo durante una prueba manual
+--node-addresses A:27400,B:27400,C:27400
 --tcp-port 28000       # cambiar puertos
 --heartbeat-port 28001
 --config-out /tmp/A.conf
@@ -168,8 +177,8 @@ sed \
   -e 's|@BIND_ADDRESS@|192.168.1.10|g' \
   -e 's|@TCP_PORT@|27400|g' \
   -e 's|@HEARTBEAT_PORT@|27401|g' \
-  -e 's|@CONTROL_PORT@|27402|g' \
   -e 's|@BOOTSTRAP_NODES@||g' \
+  -e 's|@NODE_ADDRESSES@|192.168.1.10:27400,192.168.1.11:27400,192.168.1.12:27400|g' \
   config/remote-node.conf.template > /tmp/A.conf
 
 ./build/dsm_validate /tmp/A.conf --pages 4 --threads 2 \
@@ -233,3 +242,17 @@ de un dueño caído.
 Las consultas globales usan cinco segundos por participante y son secuenciales;
 varios nodos inaccesibles pueden acumular ese tiempo. El heartbeat evita abrir
 TCP contra nodos que ya marcó como `UNAVAILABLE`.
+
+### Informe HTML desde cualquiera de las máquinas
+
+```sh
+cd /tmp
+./ruta/al/build/dsm_status 192.168.1.10 27400 --global --pages --stats --html
+ls dsm-global-192.168.1.10-27400.html
+```
+
+`--html` escribe el archivo en el directorio actual. El nombre incluye la IP y
+el puerto consultados, por lo que se pueden generar informes de varios nodos en
+la misma máquina sin sobrescribirlos. `--open` abre ese archivo con
+`xdg-open` (en una estación con escritorio). Para generar varios informes,
+repita el comando con la dirección de cada participante.

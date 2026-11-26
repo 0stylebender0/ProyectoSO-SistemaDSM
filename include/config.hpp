@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct Config {
     std::string node_name       = "node1";
@@ -13,15 +14,16 @@ struct Config {
     // 0 solicita un puerto UDP efimero al SO. Es util para pruebas y para
     // varios nodos en localhost; la configuracion de produccion lo fija.
     uint16_t    heartbeat_port  = 0;
-    uint16_t    control_port    = 5002;
 
+    // Semilla explicita y lista de participantes disponibles (IPv4 o nombre:resolver).
+    // Ambas se prueban como semillas al incorporarse.
     std::string bootstrap_nodes;
+    std::vector<std::string> node_addresses;
 
     uint32_t heartbeat_interval_ms = 1000;
     uint32_t heartbeat_timeout_ms  = 5000;
     uint32_t worker_count          = 4;
     uint32_t max_connections       = 64;
-    uint32_t max_pending_faults    = 1024;
     uint32_t request_timeout_ms    = 5000;
 };
 

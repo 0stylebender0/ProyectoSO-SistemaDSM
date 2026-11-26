@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <iterator>
+#include <set>
 #include <utility>
 
 namespace {
@@ -265,7 +267,16 @@ std::size_t HeartbeatManager::active_count() const {
 void HeartbeatManager::refresh_and_send() {
     if (peer_provider_) {
         const std::vector<NodeInfo> nodes = peer_provider_();
-        for (const auto& node : nodes) observe(node);
+        std::set<NodeId> known;
+        for (const auto& node : nodes) {
+            observe(node);
+            known.insert(node.id);
+        }
+        pthread_mutex_lock(&mutex_);
+        for (auto it = peers_.begin(); it != peers_.end();) {
+            it = known.count(it->first) ? std::next(it) : peers_.erase(it);
+        }
+        pthread_mutex_unlock(&mutex_);
     }
 
     const uint64_t now = monotonic_ms();
@@ -323,7 +334,8 @@ void HeartbeatManager::receive_available() {
         const uint64_t now = monotonic_ms();
         pthread_mutex_lock(&mutex_);
         const auto found = peers_.find(message.node_id);
-        if (found != peers_.end()) {
+        if (found != peers_.end() && found->second.has_address &&
+            same_endpoint(from, found->second.address)) {
             Peer& peer = found->second;
             peer.last_seen_ms = now;
             peer.last_sequence = message.sequence_number;

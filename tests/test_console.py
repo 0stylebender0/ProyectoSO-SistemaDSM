@@ -186,6 +186,21 @@ try:
         assert stats.returncode == 0, stats.stderr
         assert "pages_owned=0" in stats.stdout, stats.stdout
         assert "page_faults=0" in stats.stdout, stats.stdout
+        html = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(port), "--pages", "--html"],
+            capture_output=True, text=True, timeout=3, cwd=directory,
+        )
+        assert html.returncode == 0, html.stderr
+        report = directory / f"dsm-node-127.0.0.1-{port}.html"
+        assert report.is_file(), html.stdout
+        assert "STATUS_RESPONSE" in report.read_text(), report.read_text()
+        assert "node_name=eof" in report.read_text(), report.read_text()
+        global_html = subprocess.run(
+            [str(status_binary), "127.0.0.1", str(port), "--global", "--html"],
+            capture_output=True, text=True, timeout=3, cwd=directory,
+        )
+        assert global_html.returncode == 0, global_html.stderr
+        assert (directory / f"dsm-global-127.0.0.1-{port}.html").is_file(), global_html.stdout
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=3) == 0, log.read_text()
 

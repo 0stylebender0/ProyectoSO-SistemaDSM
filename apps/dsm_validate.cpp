@@ -153,7 +153,7 @@ namespace {
         return static_cast<unsigned char>((hash >> 32) & 0xFF);
     }
 
-    uint64_t page_checksum(const volatile unsigned char* data, uint32_t size) {
+    uint64_t page_checksum(const unsigned char* data, uint32_t size) {
         uint64_t hash = FNV_OFFSET;
         for (uint32_t i = 0; i < size; ++i) {
             hash ^= data[i];
@@ -233,19 +233,21 @@ namespace {
                         fail("no se pudo preparar DSMThread: " + DSM::last_error_message());
                         return;
                     }
+                    std::vector<unsigned char> bytes(page_size);
                     for (auto& region : regions) {
                         if (failed.load()) return;
-                        auto* base = static_cast<volatile unsigned char*>(region.data());
-                        if (base == nullptr) {
-                            fail("region sin direccion local valida");
-                            return;
-                        }
                         const uint64_t pages = region.get_size() / page_size;
                         for (uint64_t page = thread_id; page < pages; page += threads) {
-                            volatile unsigned char* bytes = base + page * page_size;
                             const uint64_t base_offset = page * page_size;
                             for (uint32_t i = 0; i < page_size; ++i) {
                                 bytes[i] = pattern_byte(seed, region.get_id(), base_offset + i);
+                            }
+                            if (!region.write(static_cast<std::size_t>(base_offset),
+                                              bytes.data(), page_size)) {
+                                fail("no se pudo escribir la region " +
+                                     std::to_string(region.get_id()) + ": " +
+                                     DSM::last_error_message());
+                                return;
                             }
                         }
                     }
@@ -294,23 +296,24 @@ namespace {
                         fail("no se pudo preparar DSMThread: " + DSM::last_error_message());
                         return;
                     }
+                    std::vector<unsigned char> bytes(page_size);
                     for (std::size_t index = 0; index < regions.size(); ++index) {
                         if (failed.load()) return;
-                        const auto* base =
-                            static_cast<const volatile unsigned char*>(regions[index].data());
-                        if (base == nullptr) {
-                            fail("region sin direccion local valida");
-                            return;
-                        }
                         const uint64_t pages = regions[index].get_size() / page_size;
                         for (uint64_t page = thread_id; page < pages; page += threads) {
                             const uint64_t expected = expected_page_checksum(
                                 seed, regions[index].get_id(), page, page_size);
-                            const volatile unsigned char* bytes = base + page * page_size;
                             uint64_t actual = 0;
                             bool matched = false;
                             while (Clock::now() < deadline) {
-                                actual = page_checksum(bytes, page_size);
+                                if (!regions[index].read(static_cast<std::size_t>(page * page_size),
+                                                         bytes.data(), page_size)) {
+                                    fail("no se pudo leer la region " +
+                                         std::to_string(regions[index].get_id()) + ": " +
+                                         DSM::last_error_message());
+                                    return;
+                                }
+                                actual = page_checksum(bytes.data(), page_size);
                                 if (actual == expected) {
                                     matched = true;
                                     break;

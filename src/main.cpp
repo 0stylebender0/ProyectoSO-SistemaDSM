@@ -22,6 +22,18 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
+
+namespace {
+    std::string join_list(const std::vector<std::string>& values) {
+        std::string result;
+        for (const auto& value : values) {
+            if (!result.empty()) result += ",";
+            result += value;
+        }
+        return result;
+    }
+}
 
 struct CliOptions {
     std::string config_path = "config/dsm.conf";
@@ -228,13 +240,15 @@ void print_info(const Config& cfg, const MemoryManager& memory, const NetworkMan
     std::cout << "[" << cfg.node_name << "] bind\t\t\t" << cfg.bind_address << "\n";
     std::cout << "[" << cfg.node_name << "] tcp\t\t\t" << cfg.tcp_port << "\n";
     std::cout << "[" << cfg.node_name << "] heartbeat\t\t" << network.heartbeat_port() << "\n";
-    std::cout << "[" << cfg.node_name << "] control\t\t\t" << cfg.control_port << "\n";
 
     print_memory(cfg, memory, pager);
     print_pages(cfg, pager);
 
     std::cout << "[" << cfg.node_name << "] bootstrap\t\t"
               << (cfg.bootstrap_nodes.empty() ? "(ninguno)" : cfg.bootstrap_nodes)
+              << "\n";
+    std::cout << "[" << cfg.node_name << "] participantes\t\t"
+              << (cfg.node_addresses.empty() ? "(ninguno)" : join_list(cfg.node_addresses))
               << "\n";
 
     std::cout << "[" << cfg.node_name << "] escuchando TCP en "

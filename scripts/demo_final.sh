@@ -65,7 +65,6 @@ start_node() {
         -e "s/^[[:space:]]*memory_size[[:space:]]*=.*/memory_size=16777216/" \
         -e "s/^[[:space:]]*tcp_port[[:space:]]*=.*/tcp_port=$port/" \
         -e "s/^[[:space:]]*heartbeat_port[[:space:]]*=.*/heartbeat_port=$((port + 1))/" \
-        -e "s/^[[:space:]]*control_port[[:space:]]*=.*/control_port=$((port + 2))/" \
         -e 's/^[[:space:]]*bind_address[[:space:]]*=.*/bind_address=127.0.0.1/' \
         -e "s/^[[:space:]]*bootstrap_nodes[[:space:]]*=.*/bootstrap_nodes=$bootstrap/" \
         -e 's/^[[:space:]]*interval_ms[[:space:]]*=.*/interval_ms=300/' \

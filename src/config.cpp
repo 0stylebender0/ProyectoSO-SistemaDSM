@@ -53,6 +53,19 @@ namespace {
         return true;
     }
 
+    std::vector<std::string> split_list(const std::string& text) {
+        std::vector<std::string> result;
+        std::size_t begin = 0;
+        while (begin <= text.size()) {
+            const std::size_t comma = text.find(',', begin);
+            const std::string item = trim(text.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin));
+            if (!item.empty()) result.push_back(item);
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+        return result;
+    }
+
     bool parse_u16(const std::string& text, uint16_t& out) {
         uint64_t value = 0;
         if (!parse_u64(text, value)) {
@@ -95,8 +108,8 @@ bool validate_config(const Config& cfg, std::string& error) {
         return false;
     }
 
-    if (cfg.tcp_port == 0 || cfg.control_port == 0) {
-        error = "tcp_port y control_port deben estar en el rango 1-65535";
+    if (cfg.tcp_port == 0) {
+        error = "tcp_port debe estar en el rango 1-65535";
         return false;
     }
 
@@ -166,10 +179,10 @@ bool load_config(const std::string& path, Config& out, std::string& error) {
             if (!parse_u16(value, out.tcp_port)) return invalid_value("entero de 16 bits");
         } else if (key == "heartbeat_port") {
             if (!parse_u16(value, out.heartbeat_port)) return invalid_value("entero de 16 bits");
-        } else if (key == "control_port") {
-            if (!parse_u16(value, out.control_port)) return invalid_value("entero de 16 bits");
         } else if (key == "bootstrap_nodes") {
             out.bootstrap_nodes = value;
+        } else if (key == "node_addresses") {
+            out.node_addresses = split_list(value);
         } else if (key == "interval_ms") {
             if (!parse_u32(value, out.heartbeat_interval_ms)) return invalid_value("entero de 32 bits");
         } else if (key == "timeout_ms") {
@@ -178,8 +191,6 @@ bool load_config(const std::string& path, Config& out, std::string& error) {
             if (!parse_u32(value, out.worker_count)) return invalid_value("entero de 32 bits");
         } else if (key == "max_connections") {
             if (!parse_u32(value, out.max_connections)) return invalid_value("entero de 32 bits");
-        } else if (key == "max_pending_faults") {
-            if (!parse_u32(value, out.max_pending_faults)) return invalid_value("entero de 32 bits");
         } else if (key == "request_timeout_ms") {
             if (!parse_u32(value, out.request_timeout_ms)) return invalid_value("entero de 32 bits");
         } else {
