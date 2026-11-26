@@ -92,6 +92,22 @@ namespace {
         require(first.valid() && first.get_size() == config.page_size, "redondeo a pagina");
         auto second = DSM::create_region(config.page_size);
         require(second.valid(), "segunda region");
+        const auto known = DSM::get_regions();
+        bool found_first = false;
+        bool found_second = false;
+        for (const auto& region : known) {
+            if (region.id == first.get_id() && region.owner_id == self.id &&
+                region.size == config.page_size) found_first = true;
+            if (region.id == second.get_id() && region.owner_id == self.id &&
+                region.size == config.page_size) found_second = true;
+        }
+        require(known.size() == 2 && found_first && found_second,
+                "descubrir regiones locales con la API");
+        const auto own = DSM::get_remote_regions(self.id);
+        require(own.size() == 2, "consultar las regiones del nodo local");
+        require(DSM::get_remote_regions(0).empty() &&
+                DSM::last_error() == DSMError::INVALID_REGION,
+                "dueno invalido al descubrir regiones");
         auto copy = first;
         void* address = first.data();
         *first.as<volatile uint64_t>() = 123;
@@ -220,7 +236,12 @@ namespace {
         Configuration local_config(owner_config.port);
         require(DSM::initialize(local_config.path) == DSMError::SUCCESS, "initialize con bootstrap");
         require(DSM::get_nodes().size() == 2, "descubrimiento usando API");
-        auto remote = DSM::attach_region(reply.region, reply.owner);
+        const auto discovered = DSM::get_remote_regions(reply.owner);
+        require(discovered.size() == 1 && discovered[0].id == reply.region &&
+                discovered[0].owner_id == reply.owner &&
+                discovered[0].size == local_config.page_size,
+                "descubrir la region remota con la API");
+        auto remote = DSM::attach_region(discovered[0].id, discovered[0].owner_id);
         require(remote.valid(), "attach remoto");
         require(*remote.as<volatile uint64_t>() == 42, "lectura remota bajo demanda");
         *remote.as<volatile uint64_t>() = 99;

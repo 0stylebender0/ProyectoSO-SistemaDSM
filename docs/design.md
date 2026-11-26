@@ -1149,6 +1149,41 @@ Con el heartbeat del hito 3.3, un proceso terminado con `SIGKILL` se marca `UNAV
 
 El protocolo se actualiza a versión 6 por la nueva bandera STATUS. Todos los nodos y clientes deben recompilarse. La demo comprueba tres nodos con nueve copias locales de páginas, tres páginas propias y nueve páginas usadas. Las pruebas verifican además totales parciales al matar un nodo y timeouts ante un participante detenido.
 
+### 9.10 Descubrimiento de regiones del hito 3.4
+
+La aplicación de validación no recibe los identificadores de región por línea
+de comandos. Cada participante descubre las regiones de sus pares mediante dos
+consultas añadidas a `include/dsm.hpp`:
+
+```cpp
+struct DSMRegionInfo {
+    DSMRegionId id = 0;
+    DSMNodeId owner_id = 0;
+    std::size_t size = 0;
+    uint32_t page_size = 0;
+};
+
+static std::vector<DSMRegionInfo> get_regions();
+static std::vector<DSMRegionInfo> get_remote_regions(DSMNodeId owner_id);
+```
+
+`get_regions()` devuelve las regiones conocidas en la tabla local del Pager:
+tanto las propias como las copias remotas que este nodo ya adjuntó. El vector
+se ordena por `region_id` para que la salida sea reproducible.
+
+`get_remote_regions(owner_id)` envía `REGION_LIST_REQUEST` al participante,
+filtra la respuesta para conservar solamente las regiones cuyo `owner_id`
+coincide con el nodo consultado y devuelve sus descriptores. Un nodo puede
+conocer copias de otros dueños; esas copias no se presentan como propias. Si el
+dueño no está en la tabla o el heartbeat lo marcó `UNAVAILABLE` se devuelve
+`NODE_UNAVAILABLE`; si la consulta TCP falla se devuelve `NETWORK_ERROR`. Una
+lista vacía con `last_error()==SUCCESS` significa que el participante no tiene
+regiones propias. Si `owner_id` es el nodo local, la consulta se responde con la
+tabla del Pager, sin abrir TCP.
+
+La consulta reutiliza `REGION_LIST_REQUEST`/`REGION_LIST_RESPONSE`, ya usados por
+la demo interna del hito 2.7. No cambia el protocolo, que continúa en versión 6.
+
 # 10. Archivo de configuración
 
 ## 10.1 Descripción
@@ -1597,9 +1632,10 @@ Cada nodo abre un socket `SOCK_DGRAM` en `bind_address:heartbeat_port`. El valor
 `heartbeat_port=0` solicita al sistema operativo un puerto efímero; el puerto real
 se obtiene con `getsockname` y se publica en el `NodeInfo` local antes de
 incorporarse a la tabla. Esto permite ejecutar varios nodos en localhost sin
-compartir el mismo puerto UDP y se usa en las pruebas automáticas. La
-configuración de producción conserva un puerto explícito (27401 en
-`config/dsm.conf`).
+compartir el mismo puerto UDP y se usa en las pruebas automáticas.
+`config/dsm.conf` deja `heartbeat_port=0` para facilitar varias instancias
+locales; la plantilla `config/remote-node.conf.template` fija 27401 para los
+clusters de la sección 19.
 
 Un solo hilo atiende el socket. En cada iteración:
 
@@ -1717,3 +1753,195 @@ ctest --test-dir build --output-on-failure
   puertos hay que abrir el rango TCP y el puerto UDP configurado.
 - La tabla de disponibilidad es local a cada nodo; no se replica ni se somete a
   consenso.
+
+---
+
+# 19. Validación final y despliegue multimáquina (hito 3.4)
+
+## 19.1 Alcance
+
+El hito 3.4 cierra la entrega final de la sección 16.3 con una aplicación que
+usa exclusivamente la API pública, una demo local con caída y reincorporación,
+y el procedimiento para ejecutar el sistema en computadoras separadas.
+
+La validación comprueba:
+
+- creación y compartición de varias regiones y páginas;
+- escritura determinista desde varios hilos;
+- checksums locales y remotos calculados sobre los mismos bytes;
+- descubrimiento de las regiones de cada dueño sin pasar identificadores a mano;
+- caída abrupta de un observador y reincorporación con un `NodeId` nuevo;
+- el mismo resultado en varias máquinas con la configuración adecuada.
+
+No se agrega persistencia ni recuperación de datos cuando cae el dueño de una
+región. Esa limitación se mantiene y la demo final no la presenta como resuelta.
+
+## 19.2 Aplicación `dsm_validate`
+
+El ejecutable `build/dsm_validate` se compila desde `apps/dsm_validate.cpp` y
+solo incluye `dsm.hpp`. No usa `DSMNode`, `Pager`, `NetworkManager` ni cabeceras
+internas.
+
+```sh
+./build/dsm_validate <config> [opciones]
+```
+
+| Opción | Descripción | Default |
+|---|---|---|
+| `--pages <n>` | Páginas por región propia. | 4 |
+| `--threads <n>` | Hilos de escritura y verificación. | 2 |
+| `--regions <n>` | Regiones propias; `0` crea un observador. | 1 |
+| `--expect-nodes <n>` | Participantes totales que deben conocerse. | 1 |
+| `--expect-peers <n>` | Pares con regiones que se deben verificar. | 0 |
+| `--membership-timeout-ms <n>` | Espera máxima por participantes. | 15000 |
+| `--verify-timeout-ms <n>` | Espera máxima de verificación. | 20000 |
+| `--hold-ms <n>` | Tiempo activo después de `RESULT OK`. | 0 |
+| `--seed <n>` | Semilla del patrón determinista. | 20261126 |
+
+Cada nodo crea `--regions` regiones de `--pages * page_size` bytes. El patrón de
+cada byte se deriva con FNV-1a de la semilla, el `RegionId` y el desplazamiento
+dentro de la región. Por eso cualquier participante puede calcular los bytes
+esperados de una región ajena sin recibir un archivo de referencia.
+
+La escritura se reparte por páginas entre los hilos solicitados. Cada página
+pertenece a un solo hilo, de modo que no hay dos escritores sobre los mismos
+bytes. Cada hilo crea su propia guardia `DSMThread` y comprueba `valid()` antes
+de tocar la memoria DSM. La verificación también usa hilos y vuelve a leer la
+memoria con `DSMThread`; así se ejercitan los fallos de página, la transferencia
+y la invalidación desde varios hilos.
+
+El checksum de una página es FNV-1a de sus bytes. El de una región pliega los
+checksums de sus páginas en orden. La aplicación:
+
+1. escribe las regiones propias;
+2. verifica byte a byte el patrón y calcula el checksum local;
+3. espera a que se conozcan `--expect-nodes` participantes;
+4. descubre con `get_remote_regions` las regiones propias de cada par;
+5. las adjunta con `attach_region` y verifica sus páginas;
+6. repite la verificación de un par hasta `--verify-timeout-ms` si el dueño
+   todavía está escribiendo o si una página acaba de ser invalidada;
+7. imprime los checksums y termina con código 0 si todo coincide.
+
+Un par con cero regiones propias, como un observador, no se cuenta en
+`--expect-peers`; solo se cuentan los pares con regiones verificadas. Esto evita
+confundir un observador con un dueño que todavía no terminó de crear su región.
+
+Formato estable de salida:
+
+```text
+[validate] node=A id=... page_size=4096 pages=4 threads=2 regions=1 seed=424242
+[checksum] source=local region=... owner=... pages=4 bytes=16384 value=0x...
+[validate] local regions=1 pages=4 bytes=16384
+[checksum] source=remote region=... owner=... pages=4 bytes=16384 value=0x... peer=B
+[validate] peer name=B id=... regions=1 verified
+[validate] remote peers=2 regions=2 bytes=32768
+[validate] RESULT OK
+```
+
+Los scripts comparan las líneas `[checksum]` por `region` y exigen un único
+valor. Si la validación falla se imprime `[validate] RESULT FALLO: ...` y el
+código es 1. Después de `RESULT OK`, un error de `shutdown` al devolver copias
+de solo lectura a un dueño que ya se retiró se informa como aviso y no cambia el
+resultado de la validación.
+
+## 19.3 Demo final local
+
+`scripts/demo_final.sh` ejecuta cuatro procesos en localhost con puertos
+distintos y `heartbeat_port = tcp_port + 1`:
+
+- A, B y C son dueños: cada uno crea una región de cuatro páginas y la escribe
+  con dos hilos.
+- D es observador (`--regions 0`): verifica las regiones de A, B y C.
+- Los cuatro comparan checksums: cada región aparece cuatro veces con el mismo
+  valor.
+- Se mata D con `SIGKILL`. El heartbeat lo marca `UNAVAILABLE` y
+  `dsm_status --global --nodes` muestra la consulta parcial.
+- D vuelve a arrancar con los mismos puertos y un `NodeId` nuevo. Verifica otra
+  vez las tres regiones y reproduce exactamente los mismos checksums.
+
+```sh
+bash scripts/demo_final.sh [puerto_base]
+```
+
+El puerto base es 28400. La demo termina con código 0 solo si los 12 checksums
+iniciales coinciden, la caída se detecta y la reincorporación verifica las tres
+regiones. Se registra como prueba `final_demo` en CTest.
+
+El observador se elige para la caída porque no es dueño de datos. Matar un dueño
+seguiría perdiendo su región: el sistema no implementa recuperación ante la
+caída del dueño.
+
+## 19.4 Despliegue en computadoras separadas
+
+La guía completa está en `docs/remote.md`. Los elementos incluidos son:
+
+- `config/remote-node.conf.template`, con marcadores para nombre, IP, puertos y
+  semilla;
+- `scripts/demo_remote.sh`, que genera la configuración de un nodo y ejecuta
+  `dsm_validate`;
+- instrucciones de firewall para `ufw`, `firewalld` e `iptables`.
+
+Ejemplo de tres máquinas:
+
+```sh
+# 192.168.1.10, nodo semilla
+bash scripts/demo_remote.sh --name A --bind 192.168.1.10
+
+# 192.168.1.11
+bash scripts/demo_remote.sh --name B --bind 192.168.1.11 \
+    --bootstrap 192.168.1.10:27400
+
+# 192.168.1.12
+bash scripts/demo_remote.sh --name C --bind 192.168.1.12 \
+    --bootstrap 192.168.1.10:27400
+```
+
+Reglas de despliegue:
+
+- `bind_address` debe ser la IPv4 de la máquina que los demás pueden alcanzar.
+  `0.0.0.0` solo sirve para escuchar; el nodo anunciaría `127.0.0.1` y el
+  cluster remoto no podría volver a conectarse.
+- El nodo semilla deja `bootstrap_nodes` vacío; los demás apuntan a su
+  `IP:puerto TCP`.
+- Todos los nodos deben usar el mismo `page_size`, la misma versión del
+  protocolo (6) y binarios compilados desde la misma revisión.
+- Se necesita TCP de entrada en `tcp_port` (27400 por defecto) y UDP de entrada
+  en `heartbeat_port` (27401). `control_port` (27402) queda reservado.
+- El heartbeat usa `steady_clock`; no requiere sincronizar relojes entre
+  máquinas.
+
+Para probar la caída en un cluster, se puede ejecutar un observador
+(`--regions 0 --peers 2`) en una cuarta máquina, matarlo con `SIGKILL`, esperar
+`timeout_ms + interval_ms` y volver a lanzar el mismo comando. No se debe matar
+un dueño si se espera conservar su región.
+
+## 19.5 Pruebas y aceptación
+
+`tests/test_validate.py` inicia tres dueños en localhost, cada uno con tres
+páginas y dos hilos, y comprueba:
+
+- código 0 y `RESULT OK` en los tres procesos;
+- exactamente un checksum local y dos remotos por nodo;
+- tres regiones observadas por los tres nodos;
+- un único valor de checksum por región.
+
+`scripts/demo_final.sh` se ejecuta además como prueba `final_demo` y cubre la
+caída `SIGKILL` y la reincorporación. La suite completa queda en 14 pruebas:
+
+```sh
+cmake -B build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+## 19.6 Limitaciones de la validación
+
+- FNV-1a detecta corrupción y discrepancias de contenido; no es una función
+  criptográfica ni protege contra un participante malicioso.
+- La verificación remota espera a que el dueño termine de escribir, pero no
+  establece una barrera global entre todos los nodos. El patrón es determinista,
+  así que una escritura completa posterior produce el mismo checksum.
+- La demo final usa un observador para la caída. La recuperación de una región
+  cuyo dueño cae sigue fuera del alcance de esta entrega.
+- La guía remota asume conectividad IPv4 directa entre las máquinas; no cubre
+  NAT, túneles ni descubrimiento por nombres DNS.

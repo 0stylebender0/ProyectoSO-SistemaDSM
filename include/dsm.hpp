@@ -50,6 +50,13 @@ struct DSMNodeInfo {
     uint32_t page_size = 0;
 };
 
+struct DSMRegionInfo {
+    DSMRegionId id = 0;
+    DSMNodeId owner_id = 0;
+    std::size_t size = 0;
+    uint32_t page_size = 0;
+};
+
 namespace dsm_detail { struct RegionState; }
 
 class DSMRegion {
@@ -97,6 +104,10 @@ public:
     static DSMStatistics get_statistics();
     static DSMNodeInfo get_local_node();
     static std::vector<DSMNodeInfo> get_nodes();
+    // Regiones conocidas localmente: propias y copias ya adjuntadas.
+    static std::vector<DSMRegionInfo> get_regions();
+    // Regiones propias del nodo indicado, consultadas a ese participante.
+    static std::vector<DSMRegionInfo> get_remote_regions(DSMNodeId owner_id);
     // El ultimo error pertenece al hilo que realizo la llamada.
     static DSMError last_error();
     static std::string last_error_message();

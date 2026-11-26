@@ -144,6 +144,22 @@ namespace {
         return {node.id, node.node_name, node.ip_address, node.tcp_port,
                 node.heartbeat_port, node.memory_size, node.page_size};
     }
+
+    DSMRegionInfo public_region(const RegionDescriptor& descriptor) {
+        return {descriptor.region_id, descriptor.owner_id,
+                static_cast<std::size_t>(descriptor.size), descriptor.page_size};
+    }
+
+    std::vector<DSMRegionInfo> public_regions(std::vector<RegionDescriptor> descriptors) {
+        std::sort(descriptors.begin(), descriptors.end(),
+                  [](const RegionDescriptor& a, const RegionDescriptor& b) {
+                      return a.region_id < b.region_id;
+                  });
+        std::vector<DSMRegionInfo> regions;
+        regions.reserve(descriptors.size());
+        for (const auto& descriptor : descriptors) regions.push_back(public_region(descriptor));
+        return regions;
+    }
 }
 
 DSMRegion::DSMRegion(std::shared_ptr<dsm_detail::RegionState> state) : state_(std::move(state)) {}
@@ -336,6 +352,58 @@ std::vector<DSMNodeInfo> DSM::get_nodes() {
     for (const auto& node : call.runtime->network->nodes()) nodes.push_back(public_node(node));
     result(DSMError::SUCCESS);
     return nodes;
+}
+
+std::vector<DSMRegionInfo> DSM::get_regions() {
+    Call call;
+    if (!call.runtime) return {};
+    std::vector<RegionDescriptor> descriptors;
+    for (const auto& region : call.runtime->node->pager().region_snapshot()) {
+        descriptors.push_back(region.descriptor);
+    }
+    result(DSMError::SUCCESS);
+    return public_regions(std::move(descriptors));
+}
+
+std::vector<DSMRegionInfo> DSM::get_remote_regions(DSMNodeId owner_id) {
+    Call call;
+    if (!call.runtime) return {};
+    if (owner_id == 0) {
+        result(DSMError::INVALID_REGION, "el identificador del dueno no puede ser cero");
+        return {};
+    }
+    if (owner_id == call.runtime->network->node_id()) {
+        std::vector<RegionDescriptor> descriptors;
+        for (const auto& region : call.runtime->node->pager().region_snapshot()) {
+            if (region.descriptor.owner_id == owner_id) {
+                descriptors.push_back(region.descriptor);
+            }
+        }
+        result(DSMError::SUCCESS);
+        return public_regions(std::move(descriptors));
+    }
+    NodeInfo owner;
+    if (!call.runtime->network->find_node(owner_id, owner)) {
+        result(DSMError::NODE_UNAVAILABLE, "nodo dueno desconocido");
+        return {};
+    }
+    if (!call.runtime->network->node_available(owner_id)) {
+        result(DSMError::NODE_UNAVAILABLE, "nodo dueno no disponible segun heartbeat");
+        return {};
+    }
+    std::vector<RegionDescriptor> descriptors;
+    std::string error;
+    if (!call.runtime->network->query_regions(owner, descriptors, error)) {
+        result(DSMError::NETWORK_ERROR, error);
+        return {};
+    }
+    // La lista del par incluye regiones de otros duenos que ese nodo adjunto.
+    descriptors.erase(std::remove_if(descriptors.begin(), descriptors.end(),
+                                     [owner_id](const RegionDescriptor& descriptor) {
+                                         return descriptor.owner_id != owner_id;
+                                     }), descriptors.end());
+    result(DSMError::SUCCESS);
+    return public_regions(std::move(descriptors));
 }
 
 DSMError DSM::last_error() { return error_code; }

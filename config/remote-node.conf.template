@@ -1,0 +1,34 @@
+# Plantilla de configuracion para un nodo DSM en otra maquina.
+# scripts/demo_remote.sh reemplaza los valores @...@. Para uso manual,
+# copie este archivo, sustituya los marcadores y revise las notas de
+# docs/remote.md antes de iniciar el nodo.
+[general]
+node_name=@NODE_NAME@
+memory_size=33554432
+page_size=4096
+
+[network]
+# Debe ser la IPv4 de esta maquina alcanzable por los demas participantes.
+# No use 0.0.0.0 en un cluster remoto: el nodo anunciaria 127.0.0.1.
+bind_address=@BIND_ADDRESS@
+tcp_port=@TCP_PORT@
+# UDP del heartbeat. Puede ser 0 para que el SO asigne uno efimero, pero
+# en un cluster conviene fijarlo y abrirlo en el firewall.
+heartbeat_port=@HEARTBEAT_PORT@
+control_port=@CONTROL_PORT@
+
+[discovery]
+# IP:puerto TCP del nodo semilla. En el primer nodo puede quedar vacio.
+bootstrap_nodes=@BOOTSTRAP_NODES@
+
+[heartbeat]
+interval_ms=1000
+timeout_ms=5000
+
+[network_workers]
+worker_count=4
+max_connections=64
+
+[paging]
+max_pending_faults=1024
+request_timeout_ms=5000
