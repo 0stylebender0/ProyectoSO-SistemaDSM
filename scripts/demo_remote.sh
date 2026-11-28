@@ -131,7 +131,7 @@ if [[ -z $node_addresses ]]; then
 fi
 if [[ ! -x $validate_binary ]]; then
     echo "No se encontro dsm_validate: $validate_binary" >&2
-    echo "Compile con: cmake -B build && cmake --build build -j" >&2
+    echo "Compile con: ./build_manual.sh" >&2
     exit 1
 fi
 if [[ ! -f $template ]]; then

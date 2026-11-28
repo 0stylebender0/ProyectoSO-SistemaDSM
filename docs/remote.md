@@ -21,8 +21,7 @@ instancia.
 
 - La misma revisión del proyecto y binarios compilados en todas las máquinas:
   ```sh
-  cmake -B build
-  cmake --build build -j
+  ./build_manual.sh
   ```
 - El mismo `page_size` en todos los nodos. La plantilla usa 4096.
 - La misma versión de protocolo (6). Mezclar binarios de revisiones distintas

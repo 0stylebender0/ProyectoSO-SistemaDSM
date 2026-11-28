@@ -16,7 +16,7 @@ if ((base_port < 1 || base_port > 65513)); then
     exit 1
 fi
 if [[ ! -x $validate_binary || ! -x $status_binary ]]; then
-    echo "Primero compila: cmake -B build && cmake --build build -j" >&2
+    echo "Primero compila: ./build_manual.sh" >&2
     exit 1
 fi
 

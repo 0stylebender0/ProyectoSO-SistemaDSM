@@ -1129,9 +1129,8 @@ La cabecera pública es `include/dsm.hpp` y la biblioteca es `build/libdsm.a`. L
 | `DSMThread()` / `valid()` | Registra al hilo adicional mientras accede a DSM. | `valid()` es false si el hilo no se registró |
 
 ```sh
-cmake -B build
-cmake --build build -j4
-ctest --test-dir build --output-on-failure
+./build_manual.sh
+./test_manual.sh
 ./build/dsm_app config/dsm.conf
 ```
 
@@ -1253,7 +1252,7 @@ sustantivas que usan solamente la API pública:
   `dsm_matrix <config> --attach <region_id> <owner_id> <filas> <columnas>`
   hacen lo mismo sobre una matriz, informando la suma de cada fila y el total.
 
-La prueba `ctest -R apps` lanza dos nodos por aplicación: el dueño crea y
+La prueba `apps` de `test_manual.sh` lanza dos nodos por aplicación: el dueño crea y
 mantiene la región, el segundo la adjunta y modifica. Comprueba que ambos
 calculan la misma suma, que la escritura remota reaparece en el dueño y que se
 registran fallos y transferencias de página.
@@ -1480,7 +1479,8 @@ Se propone organizar el proyecto en los siguientes módulos:
 ```text
 DSM/
 │
-├── CMakeLists.txt
+├── build_manual.sh
+├── test_manual.sh
 │
 ├── config/
 │   └── dsm.conf
@@ -1814,9 +1814,8 @@ recuperarse.
 La suite completa se ejecuta con:
 
 ```sh
-cmake -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+./build_manual.sh
+./test_manual.sh
 ```
 
 ## 18.8 Limitaciones
@@ -1941,7 +1940,7 @@ bash scripts/demo_final.sh [puerto_base]
 
 El puerto base es 28400. La demo termina con código 0 solo si los 12 checksums
 iniciales coinciden, la caída se detecta y la reincorporación verifica las tres
-regiones. Se registra como prueba `final_demo` en CTest.
+regiones. Se ejecuta como prueba `final_demo` en `test_manual.sh`.
 
 El observador se elige para la caída porque no es dueño de datos. Matar un dueño
 seguiría perdiendo su región: el sistema no implementa recuperación ante la
@@ -2008,9 +2007,8 @@ para comprobar el reintento de `node_addresses`.
 caída `SIGKILL` y la reincorporación. La suite completa queda en 16 pruebas:
 
 ```sh
-cmake -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+./build_manual.sh
+./test_manual.sh
 ```
 
 ## 19.6 Limitaciones de la validación
@@ -2032,12 +2030,10 @@ Debug con GCC):
 
 | Ejecución | Resultado |
 |---|---|
-| `ctest --test-dir build --output-on-failure` | 16/16 pruebas superadas |
-| `scripts/run_sanitizers.sh` (ASan + UBSan, suite completa) | 16/16 sin errores |
-| `scripts/run_sanitizers.sh` (TSan, subconjunto selectivo) | 5/5 sin errores |
-| `ctest -R validation` repetido 10 veces | 10/10 |
+| `./test_manual.sh` | 16/16 pruebas superadas |
+| prueba `validation` repetida 10 veces | 10/10 |
 
-La duración total de la suite sin sanitizers es de aproximadamente 37 segundos;
+La duración total de la suite es de aproximadamente 37 segundos;
 `final_demo` aporta la mayor parte. `apps` tarda unos 8 segundos porque cada
 aplicación mantiene el nodo dueño cuatro segundos.
 
