@@ -1,3 +1,4 @@
+import os
 import re
 import socket
 import subprocess
@@ -7,6 +8,7 @@ import time
 from pathlib import Path
 
 array_binary, matrix_binary = [Path(arg) for arg in sys.argv[1:3]]
+ATTACHERS = int(os.environ.get("DSM_TEST_ATTACHERS", "3"))
 
 
 def free_ports(count):
@@ -52,53 +54,61 @@ def region_line(path, timeout=20):
 
 
 def run_case(directory, ports, binary, create_args, attach_args, expected, tag):
-    configs = [directory / f"{tag}-a.conf", directory / f"{tag}-b.conf"]
-    # La primera semilla esta caida: node_addresses debe probar la siguiente.
+    configs = [directory / f"{tag}-a.conf"] + [
+        directory / f"{tag}-b{i}.conf" for i in range(ATTACHERS)]
+    logs = [directory / f"{tag}-a.log"] + [
+        directory / f"{tag}-b{i}.log" for i in range(ATTACHERS)]
     write_config(configs[0], "A", ports[0])
-    write_config(configs[1], "B", ports[1], "",
-                 f"127.0.0.1:1,127.0.0.1:{ports[0]}")
-    logs = [directory / f"{tag}-a.log", directory / f"{tag}-b.log"]
     handles = [path.open("w") for path in logs]
     owner = subprocess.Popen(
         [str(binary), str(configs[0])] + create_args,
         stdout=handles[0], stderr=subprocess.STDOUT, text=True)
+    children = []
     try:
         region, owner_id = region_line(logs[0])
-        command = [str(binary), str(configs[1]), attach_args[0],
-                   region, owner_id] + attach_args[1:]
-        attach = subprocess.Popen(
-            command, stdout=handles[1], stderr=subprocess.STDOUT, text=True)
+        for i in range(ATTACHERS):
+            # La primera semilla esta caida: node_addresses debe probar la siguiente.
+            addresses = (f"127.0.0.1:1,127.0.0.1:{ports[0]}" if i == 0
+                         else f"127.0.0.1:{ports[0]}")
+            write_config(configs[i + 1], f"B{i}", ports[i + 1], "", addresses)
+            command = [str(binary), str(configs[i + 1]), attach_args[0],
+                       region, owner_id] + attach_args[1:]
+            children.append(subprocess.Popen(
+                command, stdout=handles[i + 1], stderr=subprocess.STDOUT, text=True))
         results = []
-        for process in (owner, attach):
+        for process in [owner] + children:
             try:
                 results.append(process.wait(timeout=25))
             except subprocess.TimeoutExpired:
                 process.kill()
                 raise AssertionError(f"{tag}: proceso no termino\n" + "\n".join(
                     path.read_text() for path in logs))
-        assert results == [0, 0], "\n".join(path.read_text() for path in logs)
-        owner_text, attach_text = logs[0].read_text(), logs[1].read_text()
+        assert results == [0] * len(results), "\n".join(path.read_text() for path in logs)
+        owner_text = logs[0].read_text()
         assert f"total={expected}" in owner_text or f"sum={expected}" in owner_text, owner_text
-        assert f"total={expected}" in attach_text or f"sum={expected}" in attach_text, attach_text
-        assert f"wrote={expected}" in attach_text, attach_text
-        assert (f"final m00={expected}" in owner_text or
-                f"final value0={expected}" in owner_text), owner_text
+        assert (f"final result={expected}" in owner_text or
+                f"final total={expected}" in owner_text), owner_text
+        for path in logs[1:]:
+            text = path.read_text()
+            assert f"total={expected}" in text or f"sum={expected}" in text, text
+            assert f"wrote={expected}" in text, text
     finally:
-        if owner.poll() is None:
-            owner.kill()
+        for process in [owner] + children:
+            if process.poll() is None:
+                process.kill()
         for handle in handles:
             handle.close()
 
 
 def main():
+    hold = str(min(60000, 1000 * (ATTACHERS + 1)))
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        ports = free_ports(4)
-        run_case(directory, ports[:2], array_binary,
-                 ["--create", "256", "4000"], ["--attach", "256"],
+        run_case(directory, free_ports(1 + ATTACHERS), array_binary,
+                 ["--create", "256", hold], ["--attach", "256"],
                  256 * 257 // 2, "array")
-        run_case(directory, ports[2:], matrix_binary,
-                 ["--create", "4", "8", "4000"], ["--attach", "4", "8"],
+        run_case(directory, free_ports(1 + ATTACHERS), matrix_binary,
+                 ["--create", "4", "8", hold], ["--attach", "4", "8"],
                  4 * 8 * (4 * 8 + 1) // 2, "matrix")
 
 

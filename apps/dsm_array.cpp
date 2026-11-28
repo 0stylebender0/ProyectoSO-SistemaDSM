@@ -63,13 +63,14 @@ int main(int argc, char** argv) {
         if (create && hold_ms > 60000) throw std::invalid_argument("hold-ms demasiado grande");
         const DSMRegionId region_id = create ? 0 : std::stoull(argv[3]);
         const DSMNodeId owner_id = create ? 0 : std::stoull(argv[4]);
+        const std::size_t slots = count + 1;
 
         if (DSM::initialize(argv[1]) != DSMError::SUCCESS) return fail();
 
-        DSMRegion region = create ? DSM::create_region(count * sizeof(uint64_t))
+        DSMRegion region = create ? DSM::create_region(slots * sizeof(uint64_t))
                                    : DSM::attach_region(region_id, owner_id);
         if (!region.valid()) return fail();
-        if (region.get_size() < count * sizeof(uint64_t)) {
+        if (region.get_size() < slots * sizeof(uint64_t)) {
             std::cerr << "La region es menor que el arreglo solicitado\n";
             DSM::release_region(region.get_id());
             DSM::shutdown();
@@ -87,14 +88,14 @@ int main(int argc, char** argv) {
                       << " owner=" << DSM::get_local_node().id
                       << " n=" << count << " sum=" << sum << '\n' << std::flush;
             if (hold_ms) std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
-            std::cout << "[array] final value0=" << load(region, 0) << '\n';
+            std::cout << "[array] final result=" << load(region, count) << '\n';
         } else {
             uint64_t sum = 0;
             for (std::size_t i = 0; i < count; ++i) sum += load(region, i);
-            if (!store(region, 0, sum)) return fail();
+            if (!store(region, count, sum)) return fail();
             std::cout << "[array] region=" << region.get_id()
                       << " n=" << count << " sum=" << sum
-                      << " wrote=" << load(region, 0) << '\n';
+                      << " wrote=" << load(region, count) << '\n';
             const auto stats = DSM::get_statistics();
             std::cout << "[array] faults=" << stats.page_faults
                       << " transfers=" << stats.page_transfers << '\n';

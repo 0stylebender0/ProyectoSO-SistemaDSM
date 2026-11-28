@@ -1245,17 +1245,22 @@ Además de `dsm_app` (un valor escalar), el proyecto incluye dos aplicaciones
 sustantivas que usan solamente la API pública:
 
 - `dsm_array <config> --create <n> [<hold-ms>]` inicializa un arreglo de `n`
-  enteros de 64 bits, imprime su suma y, tras la espera opcional, vuelve a leer
-  el primer elemento. `dsm_array <config> --attach <region_id> <owner_id> <n>`
-  adjunta la región, suma sus elementos y escribe la suma en la posición cero.
+  enteros de 64 bits, imprime su suma y, tras la espera opcional, lee el
+  resultado de la casilla `n`. `dsm_array <config> --attach <region_id> <owner_id> <n>`
+  adjunta la región, suma los `n` elementos inmutables y escribe la suma en la
+  casilla `n`, separada de los datos.
 - `dsm_matrix <config> --create <filas> <columnas> [<hold-ms>]` y
   `dsm_matrix <config> --attach <region_id> <owner_id> <filas> <columnas>`
-  hacen lo mismo sobre una matriz, informando la suma de cada fila y el total.
+  hacen lo mismo sobre una matriz: informan la suma de cada fila y escriben el
+  total en la casilla `filas*columnas`.
 
-La prueba `apps` de `test_manual.sh` lanza dos nodos por aplicación: el dueño crea y
-mantiene la región, el segundo la adjunta y modifica. Comprueba que ambos
-calculan la misma suma, que la escritura remota reaparece en el dueño y que se
-registran fallos y transferencias de página.
+Cualquier número de nodos puede adjuntar la misma región: todos leen las mismas
+casillas de datos y escriben el mismo valor en la casilla de resultado, por lo
+que MSI deja un resultado estable sin cerrojos de aplicación. La prueba `apps`
+de `test_manual.sh` lanza un dueño y `DSM_TEST_ATTACHERS` adjuntos (3 por
+defecto) por aplicación. Comprueba que todos calculan la misma suma, que la
+escritura remota reaparece en el dueño y que se registran fallos y transferencias
+de página.
 
 # 10. Archivo de configuración
 
@@ -2000,9 +2005,10 @@ páginas y dos hilos, y comprueba:
 - tres regiones observadas por los tres nodos;
 - un único valor de checksum por región.
 
-`tests/test_apps.py` exercises `dsm_array` and `dsm_matrix` with two nodes each;
-la configuración del segundo nodo incluye una semilla caída antes de la válida
-para comprobar el reintento de `node_addresses`.
+`tests/test_apps.py` ejerce `dsm_array` y `dsm_matrix` con un dueño y
+`DSM_TEST_ATTACHERS` adjuntos (3 por defecto); la configuración del primer
+adjunto incluye una semilla caída antes de la válida para comprobar el reintento
+de `node_addresses`.
 `scripts/demo_final.sh` se ejecuta además como prueba `final_demo` y cubre la
 caída `SIGKILL` y la reincorporación. La suite completa queda en 16 pruebas:
 

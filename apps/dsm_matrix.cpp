@@ -65,15 +65,16 @@ int main(int argc, char** argv) {
         const uint64_t hold_ms = create && argc == 6 ? std::stoull(argv[5]) : 0;
         if (create && hold_ms > 60000) throw std::invalid_argument("hold-ms demasiado grande");
         const std::size_t count = rows * cols;
+        const std::size_t slots = count + 1;
         const DSMRegionId region_id = create ? 0 : std::stoull(argv[3]);
         const DSMNodeId owner_id = create ? 0 : std::stoull(argv[4]);
 
         if (DSM::initialize(argv[1]) != DSMError::SUCCESS) return fail();
 
-        DSMRegion region = create ? DSM::create_region(count * sizeof(uint64_t))
+        DSMRegion region = create ? DSM::create_region(slots * sizeof(uint64_t))
                                    : DSM::attach_region(region_id, owner_id);
         if (!region.valid()) return fail();
-        if (region.get_size() < count * sizeof(uint64_t)) {
+        if (region.get_size() < slots * sizeof(uint64_t)) {
             std::cerr << "La region es menor que la matriz solicitada\n";
             DSM::release_region(region.get_id());
             DSM::shutdown();
@@ -97,7 +98,7 @@ int main(int argc, char** argv) {
                       << " filas=" << rows << " columnas=" << cols
                       << " total=" << total << '\n' << std::flush;
             if (hold_ms) std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
-            std::cout << "[matrix] final m00=" << load(region, 0) << '\n';
+            std::cout << "[matrix] final total=" << load(region, count) << '\n';
         } else {
             uint64_t total = 0;
             for (std::size_t i = 0; i < rows; ++i) {
@@ -106,10 +107,10 @@ int main(int argc, char** argv) {
                 std::cout << "[matrix] fila=" << i << " suma=" << row_sum << '\n';
                 total += row_sum;
             }
-            if (!store(region, 0, total)) return fail();
+            if (!store(region, count, total)) return fail();
             std::cout << "[matrix] region=" << region.get_id()
                       << " filas=" << rows << " columnas=" << cols
-                      << " total=" << total << " wrote=" << load(region, 0) << '\n';
+                      << " total=" << total << " wrote=" << load(region, count) << '\n';
             const auto stats = DSM::get_statistics();
             std::cout << "[matrix] faults=" << stats.page_faults
                       << " transfers=" << stats.page_transfers << '\n';
